@@ -1,0 +1,46 @@
+# Canonica configuration file
+# Place this at ~/.canonic/config.yaml or specify with --config
+
+# Control plane endpoint
+endpoint: "http://localhost:8080"
+
+# Authentication (MVP: static tokens)
+# See tracker.md T001 for JWT implementation
+auth:
+  # Static token for development
+  token: "dev-token-change-in-production"
+
+# Database configuration (for gateway)
+database:
+  host: "localhost"
+  port: 5432
+  user: "canonica"
+  password: "canonica_dev"
+  name: "canonica"
+  sslmode: "disable"
+
+# Engine configuration
+engines:
+  duckdb:
+    enabled: true
+    database: ":memory:"  # In-memory for dev, or path to .duckdb file
+  
+  trino:
+    enabled: false  # See tracker.md T002
+    host: "localhost"
+    port: 8080
+    catalog: "hive"
+  
+  spark:
+    enabled: false  # See tracker.md T003
+
+# Logging configuration
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json or text
+
+# Server configuration (for gateway)
+server:
+  port: 8080
+  readTimeout: "30s"
+  writeTimeout: "30s"

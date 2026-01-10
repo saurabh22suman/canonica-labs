@@ -1,0 +1,64 @@
+# Canonica Docker Compose Configuration
+# MVP deployment with Gateway + PostgreSQL + DuckDB (embedded)
+
+version: '3.8'
+
+services:
+  # PostgreSQL - Metadata store
+  postgres:
+    image: postgres:15-alpine
+    container_name: canonica-postgres
+    environment:
+      POSTGRES_USER: canonica
+      POSTGRES_PASSWORD: canonica_dev
+      POSTGRES_DB: canonica
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U canonica -d canonica"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - canonica-network
+
+  # Gateway - Main control plane service
+  # Note: Build requires Go binary to be compiled first
+  # For development, run gateway locally with: go run ./cmd/gateway
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: canonica-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      CANONICA_DB_HOST: postgres
+      CANONICA_DB_PORT: 5432
+      CANONICA_DB_USER: canonica
+      CANONICA_DB_PASSWORD: canonica_dev
+      CANONICA_DB_NAME: canonica
+      CANONICA_LOG_LEVEL: debug
+      CANONICA_LOG_FORMAT: json
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - canonica-network
+    profiles:
+      - full  # Only start with --profile full
+
+volumes:
+  postgres_data:
+
+networks:
+  canonica-network:
+    driver: bridge
