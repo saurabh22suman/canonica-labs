@@ -1,0 +1,16 @@
+# Example Virtual Table Definition
+# Use with: canonic table validate examples/sales_orders.yaml
+
+name: analytics.sales_orders
+description: Sales order data from the data warehouse
+
+sources:
+  - format: DELTA
+    location: s3://data-lake/warehouse/sales/orders
+
+capabilities:
+  - READ
+  - TIME_TRAVEL
+
+constraints:
+  - READ_ONLY

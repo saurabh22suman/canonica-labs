@@ -1,0 +1,18 @@
+# Example with multiple formats
+# Demonstrates a table backed by both Delta and Iceberg
+
+name: analytics.customer_events
+description: Customer event stream with multi-format support
+
+sources:
+  - format: DELTA
+    location: s3://data-lake/events/delta
+  - format: ICEBERG
+    location: s3://data-lake/events/iceberg
+
+capabilities:
+  - READ
+
+constraints:
+  - READ_ONLY
+  - SNAPSHOT_CONSISTENT

@@ -65,8 +65,12 @@ func TestQuery_WriteOperationsBlocked(t *testing.T) {
 			}
 
 			// Assert: Error must indicate write not allowed
-			if _, ok := err.(*errors.ErrQueryRejected); !ok {
-				t.Fatalf("expected ErrQueryRejected for %s, got %T: %v", tc.name, err, err)
+			// Accept either ErrQueryRejected or ErrWriteNotAllowed (more specific)
+			switch err.(type) {
+			case *errors.ErrQueryRejected, *errors.ErrWriteNotAllowed:
+				// OK - expected error type
+			default:
+				t.Fatalf("expected ErrQueryRejected or ErrWriteNotAllowed for %s, got %T: %v", tc.name, err, err)
 			}
 		})
 	}

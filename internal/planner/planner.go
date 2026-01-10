@@ -72,6 +72,12 @@ func (p *Planner) Plan(ctx context.Context, logical *sql.LogicalPlan) (*Executio
 		resolvedTables = append(resolvedTables, vt)
 	}
 
+	// Check SNAPSHOT_CONSISTENT constraints
+	// Per phase-1-spec.md: SNAPSHOT_CONSISTENT must be enforced
+	if err := p.checkSnapshotConsistency(logical, resolvedTables); err != nil {
+		return nil, err
+	}
+
 	// Determine required capabilities
 	required := p.determineRequiredCapabilities(logical, resolvedTables)
 
@@ -94,6 +100,55 @@ func (p *Planner) Plan(ctx context.Context, logical *sql.LogicalPlan) (*Executio
 		ResolvedTables:       resolvedTables,
 		RequiredCapabilities: required,
 	}, nil
+}
+
+// checkSnapshotConsistency enforces SNAPSHOT_CONSISTENT constraint rules.
+// Per phase-1-spec.md:
+// - Queries on SNAPSHOT_CONSISTENT tables MUST declare snapshot intent (AS OF)
+// - All SNAPSHOT_CONSISTENT tables in a query must be compatible
+func (p *Planner) checkSnapshotConsistency(logical *sql.LogicalPlan, resolvedTables []*tables.VirtualTable) error {
+	// Find all tables with SNAPSHOT_CONSISTENT constraint
+	var snapshotTables []*tables.VirtualTable
+	var nonSnapshotTables []*tables.VirtualTable
+
+	for _, vt := range resolvedTables {
+		if vt.HasConstraint(capabilities.ConstraintSnapshotConsistent) {
+			snapshotTables = append(snapshotTables, vt)
+		} else {
+			nonSnapshotTables = append(nonSnapshotTables, vt)
+		}
+	}
+
+	// If no SNAPSHOT_CONSISTENT tables, no enforcement needed
+	if len(snapshotTables) == 0 {
+		return nil
+	}
+
+	// Rule 1: SNAPSHOT_CONSISTENT tables require AS OF
+	if !logical.HasTimeTravel {
+		tableNames := make([]string, 0, len(snapshotTables))
+		for _, vt := range snapshotTables {
+			tableNames = append(tableNames, vt.Name)
+		}
+		return errors.NewConstraintViolation(
+			tableNames[0],
+			string(capabilities.ConstraintSnapshotConsistent),
+			"query must include AS OF clause for snapshot-consistent tables",
+		)
+	}
+
+	// Rule 2: Cannot mix SNAPSHOT_CONSISTENT and non-SNAPSHOT_CONSISTENT tables
+	// This is because we cannot guarantee consistency across tables with different
+	// snapshot semantics
+	if len(snapshotTables) > 0 && len(nonSnapshotTables) > 0 {
+		return errors.NewConstraintViolation(
+			snapshotTables[0].Name,
+			string(capabilities.ConstraintSnapshotConsistent),
+			"cannot mix SNAPSHOT_CONSISTENT tables with non-snapshot tables in same query",
+		)
+	}
+
+	return nil
 }
 
 // determineRequiredCapabilities determines what capabilities are needed for a query.

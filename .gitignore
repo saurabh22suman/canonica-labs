@@ -1,0 +1,34 @@
+# Binaries
+canonic
+gateway
+*.exe
+
+# Build output
+/bin/
+/dist/
+
+# Go
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config files with secrets
+config.yaml
+.canonic/
+
+# Test coverage
+coverage.txt
+coverage.html
+
+# Dependency directories
+vendor/
