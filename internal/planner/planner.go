@@ -72,6 +72,12 @@ func (p *Planner) Plan(ctx context.Context, logical *sql.LogicalPlan) (*Executio
 		resolvedTables = append(resolvedTables, vt)
 	}
 
+	// Phase 9: Check for cross-engine queries
+	// Per phase-9-spec.md: Queries spanning multiple engines require federation
+	if err := p.checkCrossEngine(resolvedTables); err != nil {
+		return nil, err
+	}
+
 	// Check SNAPSHOT_CONSISTENT constraints
 	// Per phase-1-spec.md: SNAPSHOT_CONSISTENT must be enforced
 	if err := p.checkSnapshotConsistency(logical, resolvedTables); err != nil {
@@ -100,6 +106,62 @@ func (p *Planner) Plan(ctx context.Context, logical *sql.LogicalPlan) (*Executio
 		ResolvedTables:       resolvedTables,
 		RequiredCapabilities: required,
 	}, nil
+}
+
+// checkCrossEngine detects queries that span multiple engines.
+// Per phase-9-spec.md: Returns ErrCrossEngineQuery when tables require different engines.
+func (p *Planner) checkCrossEngine(resolvedTables []*tables.VirtualTable) error {
+	if len(resolvedTables) <= 1 {
+		return nil // Single table queries can't be cross-engine
+	}
+
+	// Collect preferred engines for each table based on format
+	engines := make(map[string]bool)
+	for _, vt := range resolvedTables {
+		engine := p.preferredEngineForTable(vt)
+		engines[engine] = true
+	}
+
+	// If more than one engine is preferred, this is a cross-engine query
+	if len(engines) > 1 {
+		engineList := make([]string, 0, len(engines))
+		for e := range engines {
+			engineList = append(engineList, e)
+		}
+		return errors.NewCrossEngineQuery(engineList)
+	}
+
+	return nil
+}
+
+// preferredEngineForTable determines the preferred engine for a table.
+// Per phase-8-spec.md §7.1: Engine selection rules.
+func (p *Planner) preferredEngineForTable(vt *tables.VirtualTable) string {
+	// Rule 1: Explicit engine assignment
+	if len(vt.Sources) > 0 && vt.Sources[0].Engine != "" {
+		return vt.Sources[0].Engine
+	}
+
+	// Rule 2: Based on format
+	if len(vt.Sources) > 0 {
+		switch vt.Sources[0].Format {
+		case "iceberg":
+			return "trino" // Best Iceberg support
+		case "delta":
+			return "spark" // Native Delta support
+		case "hudi":
+			return "spark" // Hudi is Spark-native
+		case "parquet":
+			return "duckdb" // Fast for raw Parquet
+		case "orc":
+			return "trino" // Good ORC support
+		case "csv":
+			return "duckdb" // Efficient for CSV
+		}
+	}
+
+	// Default to duckdb
+	return "duckdb"
 }
 
 // checkSnapshotConsistency enforces SNAPSHOT_CONSISTENT constraint rules.
@@ -146,6 +208,32 @@ func (p *Planner) checkSnapshotConsistency(logical *sql.LogicalPlan, resolvedTab
 			string(capabilities.ConstraintSnapshotConsistent),
 			"cannot mix SNAPSHOT_CONSISTENT tables with non-snapshot tables in same query",
 		)
+	}
+
+	// Rule 3: All SNAPSHOT_CONSISTENT tables must have the same snapshot timestamp
+	// This is because different snapshots could see inconsistent data states
+	if len(snapshotTables) > 1 && len(logical.TimeTravelPerTable) > 0 {
+		var firstTimestamp string
+		var firstTable string
+		for _, vt := range snapshotTables {
+			ts, ok := logical.TimeTravelPerTable[vt.Name]
+			if !ok {
+				// Table has SNAPSHOT_CONSISTENT but no per-table AS OF
+				// This is allowed if we have a global timestamp
+				continue
+			}
+			if firstTimestamp == "" {
+				firstTimestamp = ts
+				firstTable = vt.Name
+			} else if ts != firstTimestamp {
+				return errors.NewConstraintViolation(
+					vt.Name,
+					string(capabilities.ConstraintSnapshotConsistent),
+					"all SNAPSHOT_CONSISTENT tables must use the same snapshot timestamp; "+
+						firstTable+" uses "+firstTimestamp+" but "+vt.Name+" uses "+ts,
+				)
+			}
+		}
 	}
 
 	return nil

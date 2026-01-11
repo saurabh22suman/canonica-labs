@@ -95,6 +95,8 @@ This CLI is a control interface for configuration, validation, and diagnostics.`
 	cmd.AddCommand(c.newBootstrapCmd())
 	cmd.AddCommand(c.newStatusCmd())
 	cmd.AddCommand(c.newAuditCmd())
+	// Phase 7 commands
+	cmd.AddCommand(c.newCatalogCmd())
 
 	return cmd
 }

@@ -19,6 +19,41 @@ const (
 
 	// CapabilityTimeTravel allows AS OF queries for point-in-time reads.
 	CapabilityTimeTravel Capability = "TIME_TRAVEL"
+
+	// Phase 8: Format-specific capabilities
+	// Per phase-8-spec.md §2.1: Format Capabilities
+
+	// CapabilitySnapshotQuery allows querying specific snapshots by ID.
+	// Supported by: Iceberg
+	CapabilitySnapshotQuery Capability = "SNAPSHOT_QUERY"
+
+	// CapabilityVersionQuery allows querying specific versions.
+	// Supported by: Iceberg, Delta
+	CapabilityVersionQuery Capability = "VERSION_QUERY"
+
+	// CapabilitySchemaEvolution allows reading old schemas.
+	// Supported by: Iceberg, Delta
+	CapabilitySchemaEvolution Capability = "SCHEMA_EVOLUTION"
+
+	// CapabilityPartitionPruning enables partition-based query optimization.
+	// Supported by: Iceberg, Delta, Hudi
+	CapabilityPartitionPruning Capability = "PARTITION_PRUNING"
+
+	// CapabilityIncrementalQuery allows reading changes since a timestamp.
+	// Supported by: Hudi
+	CapabilityIncrementalQuery Capability = "INCREMENTAL_QUERY"
+
+	// CapabilityAggregate allows aggregate functions (SUM, COUNT, etc.).
+	CapabilityAggregate Capability = "AGGREGATE"
+
+	// CapabilityFilter allows WHERE clause filtering.
+	CapabilityFilter Capability = "FILTER"
+
+	// CapabilityWindow allows window functions.
+	CapabilityWindow Capability = "WINDOW"
+
+	// CapabilityCTE allows Common Table Expressions.
+	CapabilityCTE Capability = "CTE"
 )
 
 // AllCapabilities returns all valid capabilities.
@@ -26,6 +61,15 @@ func AllCapabilities() []Capability {
 	return []Capability{
 		CapabilityRead,
 		CapabilityTimeTravel,
+		CapabilitySnapshotQuery,
+		CapabilityVersionQuery,
+		CapabilitySchemaEvolution,
+		CapabilityPartitionPruning,
+		CapabilityIncrementalQuery,
+		CapabilityAggregate,
+		CapabilityFilter,
+		CapabilityWindow,
+		CapabilityCTE,
 	}
 }
 

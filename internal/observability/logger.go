@@ -7,6 +7,7 @@ package observability
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -281,4 +282,189 @@ func (l *NoopLogger) GetAuditSummary() *AuditSummary {
 		TopRejectionReasons: []RejectionReasonStat{},
 		TopQueriedTables:    []TableQueryStat{},
 	}
+}
+
+// PersistentLogger implements QueryLogger with PostgreSQL persistence.
+// Per T030: Audit logs must be persisted to PostgreSQL.
+// Per phase-4-spec.md §5: Every request MUST log these fields.
+type PersistentLogger struct {
+	db     *sql.DB
+	mu     sync.RWMutex
+	writer io.Writer // optional: also write to stdout for debugging
+}
+
+// NewPersistentLogger creates a logger that persists audit entries to PostgreSQL.
+// Per T030: Audit logs must survive gateway restart.
+func NewPersistentLogger(db *sql.DB) (*PersistentLogger, error) {
+	if db == nil {
+		return nil, fmt.Errorf("observability: database connection is required for persistent logging")
+	}
+	return &PersistentLogger{
+		db: db,
+	}, nil
+}
+
+// NewPersistentLoggerWithWriter creates a logger that persists to both DB and a writer.
+func NewPersistentLoggerWithWriter(db *sql.DB, w io.Writer) (*PersistentLogger, error) {
+	if db == nil {
+		return nil, fmt.Errorf("observability: database connection is required for persistent logging")
+	}
+	return &PersistentLogger{
+		db:     db,
+		writer: w,
+	}, nil
+}
+
+// LogQuery persists a query log entry to PostgreSQL.
+// Per T030: Audit entries must be written to audit_logs table.
+func (l *PersistentLogger) LogQuery(ctx context.Context, entry QueryLogEntry) error {
+	// Check context first
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("observability: context error: %w", err)
+	}
+
+	// Validate entry
+	if err := entry.Validate(); err != nil {
+		return err
+	}
+
+	// Convert tables to JSON
+	tablesJSON, err := json.Marshal(entry.Tables)
+	if err != nil {
+		tablesJSON = []byte("[]")
+	}
+
+	// Insert into audit_logs
+	query := `
+		INSERT INTO audit_logs (
+			query_id, user_id, role, tables_json, auth_decision,
+			planner_decision, engine, execution_time_ms, outcome,
+			error_message, invariant_violated
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`
+
+	_, err = l.db.ExecContext(ctx, query,
+		entry.QueryID,
+		entry.User,
+		nullableString(entry.Role),
+		tablesJSON,
+		nullableString(entry.AuthorizationDecision),
+		nullableString(entry.PlannerDecision),
+		nullableString(entry.Engine),
+		entry.ExecutionTime.Milliseconds(),
+		nullableString(entry.Outcome),
+		nullableString(entry.Error),
+		nullableString(entry.InvariantViolated),
+	)
+	if err != nil {
+		return fmt.Errorf("observability: failed to persist audit log: %w", err)
+	}
+
+	// Also write to optional writer (for debugging)
+	if l.writer != nil {
+		level := "info"
+		if entry.Error != "" {
+			level = "error"
+		}
+		output := jsonLogOutput{
+			Timestamp:             time.Now().UTC().Format(time.RFC3339),
+			Level:                 level,
+			QueryID:               entry.QueryID,
+			User:                  entry.User,
+			Role:                  entry.Role,
+			Tables:                entry.Tables,
+			AuthorizationDecision: entry.AuthorizationDecision,
+			PlannerDecision:       entry.PlannerDecision,
+			Engine:                entry.Engine,
+			ExecutionTimeMs:       entry.ExecutionTime.Milliseconds(),
+			Outcome:               entry.Outcome,
+			Error:                 entry.Error,
+			InvariantViolated:     entry.InvariantViolated,
+		}
+		if data, err := json.Marshal(output); err == nil {
+			l.writer.Write(data)
+			l.writer.Write([]byte("\n"))
+		}
+	}
+
+	return nil
+}
+
+// GetAuditSummary returns aggregated audit statistics from the database.
+// Per phase-5-spec.md §4: "No raw data exposure"
+// Per T030: Summary must be retrieved from persisted data.
+func (l *PersistentLogger) GetAuditSummary() *AuditSummary {
+	summary := &AuditSummary{
+		TopRejectionReasons: []RejectionReasonStat{},
+		TopQueriedTables:    []TableQueryStat{},
+	}
+
+	ctx := context.Background()
+
+	// Get accepted count
+	row := l.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM audit_logs WHERE error_message IS NULL OR error_message = ''
+	`)
+	row.Scan(&summary.AcceptedCount)
+
+	// Get rejected count
+	row = l.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM audit_logs WHERE error_message IS NOT NULL AND error_message != ''
+	`)
+	row.Scan(&summary.RejectedCount)
+
+	// Get top rejection reasons
+	rows, err := l.db.QueryContext(ctx, `
+		SELECT error_message, COUNT(*) as cnt
+		FROM audit_logs
+		WHERE error_message IS NOT NULL AND error_message != ''
+		GROUP BY error_message
+		ORDER BY cnt DESC
+		LIMIT 5
+	`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var reason string
+			var count int
+			if rows.Scan(&reason, &count) == nil {
+				summary.TopRejectionReasons = append(summary.TopRejectionReasons, RejectionReasonStat{
+					Reason: reason,
+					Count:  count,
+				})
+			}
+		}
+	}
+
+	// Get top queried tables
+	rows, err = l.db.QueryContext(ctx, `
+		SELECT table_name, COUNT(*) as cnt
+		FROM audit_logs, jsonb_array_elements_text(tables_json) as table_name
+		GROUP BY table_name
+		ORDER BY cnt DESC
+		LIMIT 5
+	`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var table string
+			var count int
+			if rows.Scan(&table, &count) == nil {
+				summary.TopQueriedTables = append(summary.TopQueriedTables, TableQueryStat{
+					Table: table,
+					Count: count,
+				})
+			}
+		}
+	}
+
+	return summary
+}
+
+// nullableString converts empty strings to nil for SQL NULL.
+func nullableString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }

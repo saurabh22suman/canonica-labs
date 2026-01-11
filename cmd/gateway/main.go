@@ -6,10 +6,19 @@
 //   - "Accept SQL, Authenticate requests, Parse SQL into logical plan"
 //   - "Resolve virtual tables, Forward to planner"
 //   - "Explicitly does NOT: execute queries, optimize plans, access storage"
+//
+// Per execution-checklist.md 4.1:
+//   - "Gateway startup fails if PostgreSQL is unavailable"
+//   - "Repository is mandatory in gateway constructor"
+//
+// Per execution-checklist.md 4.3:
+//   - "Gateway startup fails if adapter registry is empty"
+//   - "Trino adapter registered in AdapterRegistry"
 package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log"
@@ -21,9 +30,14 @@ import (
 
 	"github.com/canonica-labs/canonica/internal/adapters"
 	duckdb "github.com/canonica-labs/canonica/internal/adapters/duckdb"
+	"github.com/canonica-labs/canonica/internal/adapters/spark"
+	"github.com/canonica-labs/canonica/internal/adapters/trino"
 	"github.com/canonica-labs/canonica/internal/auth"
 	"github.com/canonica-labs/canonica/internal/gateway"
 	"github.com/canonica-labs/canonica/internal/router"
+	"github.com/canonica-labs/canonica/internal/storage"
+
+	_ "github.com/lib/pq" // PostgreSQL driver
 )
 
 var (
@@ -44,8 +58,14 @@ func run() error {
 	var (
 		addr      = flag.String("addr", ":8080", "HTTP listen address")
 		token     = flag.String("token", "", "Static auth token (required)")
+		dbURL     = flag.String("db", "", "PostgreSQL connection URL (required in production)")
+		trinoHost = flag.String("trino-host", "", "Trino server host (optional)")
+		trinoPort = flag.Int("trino-port", 8080, "Trino server port")
+		sparkHost = flag.String("spark-host", "", "Spark Thrift Server host (optional)")
+		sparkPort = flag.Int("spark-port", 10000, "Spark Thrift Server port")
 		showHelp  = flag.Bool("help", false, "Show help message")
 		showVer   = flag.Bool("version", false, "Show version")
+		devMode   = flag.Bool("dev", false, "Development mode (allows in-memory repository)")
 	)
 	flag.Parse()
 
@@ -68,6 +88,17 @@ func run() error {
 		}
 	}
 
+	// Check for database URL from environment
+	if *dbURL == "" {
+		*dbURL = os.Getenv("CANONIC_DATABASE_URL")
+	}
+
+	// Per execution-checklist.md 4.1: Gateway startup fails if PostgreSQL is unavailable
+	// Unless in dev mode
+	if *dbURL == "" && !*devMode {
+		return fmt.Errorf("PostgreSQL connection required: use -db flag or CANONIC_DATABASE_URL env var (use -dev for development mode)")
+	}
+
 	// Create authenticator
 	authenticator := auth.NewStaticTokenAuthenticator()
 	authenticator.RegisterToken(*token, &auth.User{
@@ -76,24 +107,95 @@ func run() error {
 		Roles: []string{"admin"},
 	})
 
-	// Create table registry (in-memory for now)
-	tableRegistry := gateway.NewInMemoryTableRegistry()
+	// Create repository
+	// Per execution-checklist.md 4.1: Repository is mandatory
+	var repo storage.TableRepository
+	if *dbURL != "" {
+		// Connect to PostgreSQL
+		db, err := sql.Open("postgres", *dbURL)
+		if err != nil {
+			return fmt.Errorf("failed to connect to PostgreSQL: %w", err)
+		}
+		defer db.Close()
+
+		// Verify connectivity
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := db.PingContext(ctx); err != nil {
+			return fmt.Errorf("PostgreSQL connectivity check failed: %w", err)
+		}
+
+		// Per execution-checklist.md 4.4: Migrations run automatically on startup
+		log.Println("Running database migrations...")
+		migrationRunner := storage.NewMigrationRunner(db)
+		if err := migrationRunner.Run(ctx); err != nil {
+			return fmt.Errorf("migration failed: %w", err)
+		}
+		log.Println("Database migrations completed")
+
+		repo = storage.NewPostgresRepository(db)
+		log.Println("Connected to PostgreSQL")
+	} else {
+		// Development mode: use mock repository
+		log.Println("WARNING: Development mode - using in-memory repository (not for production)")
+		repo = storage.NewMockRepository()
+	}
 
 	// Create engine router
 	engineRouter := router.DefaultRouter()
 
 	// Create adapter registry
+	// Per execution-checklist.md 4.3: At least one adapter required
 	adapterRegistry := adapters.NewAdapterRegistry()
-	adapterRegistry.Register(duckdb.NewAdapter())
+
+	// Register DuckDB adapter (always available as fallback)
+	duckdbAdapter := duckdb.NewAdapter()
+	adapterRegistry.Register(duckdbAdapter)
+	log.Println("Registered DuckDB adapter")
+
+	// Per execution-checklist.md 4.3: Trino adapter registered in AdapterRegistry
+	if *trinoHost != "" || os.Getenv("CANONIC_TRINO_HOST") != "" {
+		host := *trinoHost
+		if host == "" {
+			host = os.Getenv("CANONIC_TRINO_HOST")
+		}
+		trinoAdapter := trino.NewAdapter(trino.AdapterConfig{
+			Host: host,
+			Port: *trinoPort,
+		})
+		adapterRegistry.Register(trinoAdapter)
+		log.Printf("Registered Trino adapter at %s:%d", host, *trinoPort)
+	}
+
+	// Per T003: Spark adapter wiring - register Spark when configured
+	if *sparkHost != "" || os.Getenv("CANONIC_SPARK_HOST") != "" {
+		host := *sparkHost
+		if host == "" {
+			host = os.Getenv("CANONIC_SPARK_HOST")
+		}
+		sparkAdapter := spark.NewAdapter(spark.AdapterConfig{
+			Host: host,
+			Port: *sparkPort,
+		})
+		adapterRegistry.Register(sparkAdapter)
+		log.Printf("Registered Spark adapter at %s:%d", host, *sparkPort)
+	}
 
 	// Create gateway
-	gw := gateway.NewGateway(
+	// Per execution-checklist.md: NewGateway validates repository and adapter registry
+	gw, err := gateway.NewGateway(
 		authenticator,
-		tableRegistry,
+		repo,
 		engineRouter,
 		adapterRegistry,
-		gateway.Config{Version: version},
+		gateway.Config{
+			Version:        version,
+			ProductionMode: !*devMode,
+		},
 	)
+	if err != nil {
+		return fmt.Errorf("failed to create gateway: %w", err)
+	}
 
 	// Create HTTP server
 	server := &http.Server{
@@ -125,6 +227,7 @@ func run() error {
 	log.Printf("Canonic Gateway starting on %s", *addr)
 	log.Printf("Version: %s, Commit: %s", version, commit)
 	log.Printf("Health check: http://localhost%s/health", *addr)
+	log.Printf("Readiness: http://localhost%s/readyz", *addr)
 
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("server error: %w", err)

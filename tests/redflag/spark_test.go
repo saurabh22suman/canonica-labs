@@ -185,3 +185,89 @@ func TestSpark_RejectsInvalidHost(t *testing.T) {
 func TestSpark_ImplementsEngineAdapter(t *testing.T) {
 	var _ adapters.EngineAdapter = (*spark.Adapter)(nil)
 }
+
+// Phase 6 Red-Flag Tests: Health Check
+// Per phase-6-spec.md: Verify error handling for unreachable servers
+
+// TestSpark_CheckHealthRejectsClosedAdapter verifies CheckHealth fails on closed adapter.
+// Red-Flag: Closed adapters must not report as healthy.
+func TestSpark_CheckHealthRejectsClosedAdapter(t *testing.T) {
+	adapter := spark.NewAdapter(spark.AdapterConfig{
+		Host: "localhost",
+		Port: 10000,
+	})
+	adapter.Close()
+
+	err := adapter.CheckHealth(context.Background())
+	if err == nil {
+		t.Fatal("expected error for CheckHealth on closed adapter, got nil")
+	}
+
+	// Verify error message is meaningful
+	if err.Error() == "" {
+		t.Fatal("error message should not be empty")
+	}
+}
+
+// TestSpark_CheckHealthRejectsEmptyHost verifies CheckHealth fails when host is not configured.
+// Red-Flag: Missing configuration must be caught during health check.
+func TestSpark_CheckHealthRejectsEmptyHost(t *testing.T) {
+	adapter := spark.NewAdapter(spark.AdapterConfig{
+		Host: "", // Empty host
+		Port: 10000,
+	})
+	defer adapter.Close()
+
+	err := adapter.CheckHealth(context.Background())
+	if err == nil {
+		t.Fatal("expected error for CheckHealth with empty host, got nil")
+	}
+}
+
+// TestSpark_CheckHealthRejectsUnreachableServer verifies CheckHealth fails for unreachable servers.
+// Red-Flag: Unreachable servers must not be reported as healthy.
+// Per phase-6-spec.md: "Health check must fail if server is unreachable"
+func TestSpark_CheckHealthRejectsUnreachableServer(t *testing.T) {
+	// Configure with port that is very unlikely to be in use
+	adapter := spark.NewAdapter(spark.AdapterConfig{
+		Host:              "localhost",
+		Port:              59998, // Unlikely to be in use
+		ConnectionTimeout: 100 * time.Millisecond,
+	})
+	defer adapter.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	err := adapter.CheckHealth(ctx)
+	if err == nil {
+		t.Fatal("expected error for CheckHealth on unreachable server, got nil")
+	}
+}
+
+// TestSpark_CheckHealthExplicitTimeout verifies CheckHealth uses configured timeout.
+// Red-Flag: Health checks must not hang indefinitely.
+func TestSpark_CheckHealthExplicitTimeout(t *testing.T) {
+	adapter := spark.NewAdapter(spark.AdapterConfig{
+		Host:              "10.255.255.1", // Non-routable IP - will timeout
+		Port:              10000,
+		ConnectionTimeout: 50 * time.Millisecond,
+	})
+	defer adapter.Close()
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err := adapter.CheckHealth(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error for unreachable server, got nil")
+	}
+
+	// Verify it didn't take too long (should respect the short timeout)
+	if elapsed > 2*time.Second {
+		t.Fatalf("CheckHealth took too long: %v (expected < 2s)", elapsed)
+	}
+}

@@ -47,6 +47,11 @@ type EngineAdapter interface {
 	// Ping checks if the engine is reachable.
 	Ping(ctx context.Context) error
 
+	// CheckHealth verifies the adapter is healthy and can execute queries.
+	// Per phase-6-spec.md: Returns nil if healthy, error with details if not.
+	// Used by /readyz endpoint to report per-adapter health status.
+	CheckHealth(ctx context.Context) error
+
 	// Close releases any resources held by the adapter.
 	Close() error
 }
@@ -92,4 +97,20 @@ func (r *AdapterRegistry) CloseAll() error {
 		}
 	}
 	return lastErr
+}
+
+// CheckAllHealth checks the health of all registered adapters.
+// Per phase-6-spec.md: Returns a map of adapter name to health status.
+// A nil error value indicates the adapter is healthy.
+func (r *AdapterRegistry) CheckAllHealth(ctx context.Context) map[string]error {
+	results := make(map[string]error)
+	for name, adapter := range r.adapters {
+		results[name] = adapter.CheckHealth(ctx)
+	}
+	return results
+}
+
+// IsEmpty returns true if no adapters are registered.
+func (r *AdapterRegistry) IsEmpty() bool {
+	return len(r.adapters) == 0
 }

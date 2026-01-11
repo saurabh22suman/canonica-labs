@@ -196,14 +196,65 @@ func TestSnapshotConsistent_RejectsMixedSnapshotCapabilities(t *testing.T) {
 // timestamps are rejected.
 //
 // Red-Flag: Different snapshot timestamps break consistency guarantee.
-// Note: This may require extended AS OF syntax not currently supported.
 func TestSnapshotConsistent_RejectsSnapshotMismatch(t *testing.T) {
-	t.Skip("DEFERRED: Requires per-table AS OF syntax which parser doesn't support - see tracker.md T015")
+	ctx := context.Background()
 
-	// This test would verify that:
-	// SELECT * FROM orders AS OF '2024-01-01' JOIN customers AS OF '2024-01-02'
-	// is rejected when both tables have SNAPSHOT_CONSISTENT constraint
-	// because the snapshots are not the same.
+	// Arrange: Tables with SNAPSHOT_CONSISTENT constraint
+	registry := gateway.NewInMemoryTableRegistry()
+	registry.Register(&tables.VirtualTable{
+		Name:         "orders",
+		Capabilities: []capabilities.Capability{capabilities.CapabilityRead, capabilities.CapabilityTimeTravel},
+		Constraints:  []capabilities.Constraint{capabilities.ConstraintSnapshotConsistent},
+		Sources: []tables.PhysicalSource{{
+			Engine:   "iceberg-trino",
+			Location: "catalog.schema.orders",
+			Format:   "iceberg",
+		}},
+	})
+	registry.Register(&tables.VirtualTable{
+		Name:         "customers",
+		Capabilities: []capabilities.Capability{capabilities.CapabilityRead, capabilities.CapabilityTimeTravel},
+		Constraints:  []capabilities.Constraint{capabilities.ConstraintSnapshotConsistent},
+		Sources: []tables.PhysicalSource{{
+			Engine:   "iceberg-trino",
+			Location: "catalog.schema.customers",
+			Format:   "iceberg",
+		}},
+	})
+
+	// Arrange: Router with TIME_TRAVEL capability
+	r := router.NewRouter()
+	r.RegisterEngine(&router.Engine{
+		Name:         "iceberg-trino",
+		Capabilities: []capabilities.Capability{capabilities.CapabilityRead, capabilities.CapabilityTimeTravel},
+		Available:    true,
+		Priority:     1,
+	})
+
+	p := planner.NewPlanner(registry, r)
+
+	// Act: Query joining both tables with DIFFERENT timestamps
+	parser := sql.NewParser()
+	plan, err := parser.Parse("SELECT * FROM orders FOR SYSTEM_TIME AS OF TIMESTAMP '2024-01-01T00:00:00Z' JOIN customers FOR SYSTEM_TIME AS OF TIMESTAMP '2024-01-02T00:00:00Z' ON orders.customer_id = customers.id")
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+
+	// Verify parser extracted per-table timestamps
+	if len(plan.TimeTravelPerTable) == 0 {
+		t.Fatal("expected TimeTravelPerTable to be populated, got empty map")
+	}
+
+	// Assert: Planning MUST fail due to different snapshot timestamps
+	_, planErr := p.Plan(ctx, plan)
+	if planErr == nil {
+		t.Fatal("expected error: SNAPSHOT_CONSISTENT tables with different timestamps, but got nil")
+	}
+
+	// Verify error mentions snapshot timestamp mismatch
+	if !containsAny(planErr.Error(), "snapshot", "timestamp", "consistent") {
+		t.Errorf("expected error about snapshot timestamps, got: %v", planErr)
+	}
 }
 
 // containsAny checks if the string contains any of the substrings.

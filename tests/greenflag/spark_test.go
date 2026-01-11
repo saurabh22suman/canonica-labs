@@ -178,3 +178,36 @@ func TestSpark_IsFallbackEngine(t *testing.T) {
 		t.Fatal("Spark must support TIME_TRAVEL for AS OF fallback per plan.md")
 	}
 }
+
+// Phase 6 Green-Flag Tests: Health Check Configuration
+
+// TestSpark_CheckHealthMethodExists verifies CheckHealth is available.
+// Green-Flag: Adapter must expose CheckHealth per phase-6-spec.md.
+func TestSpark_CheckHealthMethodExists(t *testing.T) {
+	adapter := spark.NewAdapter(spark.AdapterConfig{
+		Host: "localhost",
+		Port: 10000,
+	})
+	defer adapter.Close()
+
+	// Just verify method exists and can be called
+	// Error is expected since no actual Spark server is running
+	_ = adapter.CheckHealth(context.Background())
+}
+
+// TestSpark_ConnectionTimeoutConfig verifies timeout configuration is accepted.
+// Green-Flag: Custom timeout configuration should be accepted.
+func TestSpark_ConnectionTimeoutConfig(t *testing.T) {
+	config := spark.AdapterConfig{
+		Host:              "localhost",
+		Port:              10000,
+		ConnectionTimeout: 60 * 1e9, // 60 seconds
+	}
+	adapter := spark.NewAdapter(config)
+	defer adapter.Close()
+
+	// Verify adapter was created successfully
+	if adapter.Name() != "spark" {
+		t.Fatalf("expected name 'spark', got %q", adapter.Name())
+	}
+}

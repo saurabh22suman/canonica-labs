@@ -185,3 +185,32 @@ func (a *Adapter) Close() error {
 
 	return nil
 }
+
+// CheckHealth validates the connection by executing SELECT 1.
+// Per phase-6-spec.md: Health check uses simple query validation.
+// Returns nil if healthy, error with details if unhealthy.
+func (a *Adapter) CheckHealth(ctx context.Context) error {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	if a.closed {
+		return fmt.Errorf("DuckDB adapter: connection is closed")
+	}
+
+	if a.db == nil {
+		return fmt.Errorf("DuckDB adapter: no database connection")
+	}
+
+	// Execute SELECT 1 as health check
+	var result int
+	err := a.db.QueryRowContext(ctx, "SELECT 1").Scan(&result)
+	if err != nil {
+		return fmt.Errorf("DuckDB adapter health check failed: %w", err)
+	}
+
+	if result != 1 {
+		return fmt.Errorf("DuckDB adapter health check: unexpected result %d", result)
+	}
+
+	return nil
+}

@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -68,7 +70,7 @@ func (c *CLI) runTableRegister(filePath string) error {
 		return err
 	}
 
-	// Validate the table
+	// Validate the table structure locally first (fail-fast)
 	if err := vt.Validate(); err != nil {
 		c.errorf("Validation failed: %v\n", err)
 		return err
@@ -76,19 +78,43 @@ func (c *CLI) runTableRegister(filePath string) error {
 
 	c.debugf("Table definition valid: %s\n", vt.Name)
 
-	// TODO: Send to gateway for registration
-	// For now, we just validate locally
-	c.printf("✓ Table '%s' validated successfully\n", vt.Name)
-	c.println("  Note: Gateway registration not yet implemented (local validation only)")
+	// Per execution-checklist.md 4.2: CLI uses GatewayClient exclusively
+	// CLI fails hard if gateway is unreachable
+	client := c.newGatewayClient()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Convert to gateway request
+	req := &RegisterTableRequest{
+		Name:        vt.Name,
+		Description: vt.Description,
+	}
+	for _, src := range vt.Sources {
+		req.Sources = append(req.Sources, SourceInfo{
+			Format:   string(src.Format),
+			Location: src.Location,
+		})
+	}
+	for _, cap := range vt.Capabilities {
+		req.Capabilities = append(req.Capabilities, string(cap))
+	}
+	for _, con := range vt.Constraints {
+		req.Constraints = append(req.Constraints, string(con))
+	}
+
+	if err := client.RegisterTable(ctx, req); err != nil {
+		c.errorf("Registration failed: %v\n", err)
+		return err
+	}
 
 	if c.jsonOutput {
 		return c.outputJSON(map[string]interface{}{
-			"status":  "validated",
-			"table":   vt.Name,
-			"message": "gateway registration pending implementation",
+			"status": "registered",
+			"table":  vt.Name,
 		})
 	}
 
+	c.printf("✓ Table '%s' registered successfully\n", vt.Name)
 	return nil
 }
 
@@ -175,13 +201,30 @@ Shows:
 }
 
 func (c *CLI) runTableDescribe(tableName string) error {
-	// TODO: Fetch from gateway
-	// For now, show a mock response
-	c.println("Table:", tableName)
-	c.println("  Status: Not registered (gateway not connected)")
-	c.println("")
-	c.println("Note: Gateway connection not yet implemented.")
-	c.println("      Use 'canonic table validate <file.yaml>' to validate locally.")
+	// Per execution-checklist.md 4.2: CLI uses GatewayClient exclusively
+	client := c.newGatewayClient()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	table, err := client.DescribeTable(ctx, tableName)
+	if err != nil {
+		c.errorf("Failed to describe table: %v\n", err)
+		return err
+	}
+
+	if c.jsonOutput {
+		return c.outputJSON(table)
+	}
+
+	c.println("Table:", table.Name)
+	c.printf("  Capabilities: %s\n", strings.Join(table.Capabilities, ", "))
+	if len(table.Constraints) > 0 {
+		c.printf("  Constraints: %s\n", strings.Join(table.Constraints, ", "))
+	}
+	c.println("  Sources:")
+	for _, src := range table.Sources {
+		c.printf("    - %s: %s\n", src.Format, src.Location)
+	}
 
 	return nil
 }
@@ -210,19 +253,67 @@ func (c *CLI) newTableListCmd() *cobra.Command {
 }
 
 func (c *CLI) runTableList(engine, capability, constraint string) error {
-	// TODO: Fetch from gateway
-	// For now, show empty list with note
+	// Per execution-checklist.md 4.2: CLI uses GatewayClient exclusively
+	client := c.newGatewayClient()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tables, err := client.ListTables(ctx)
+	if err != nil {
+		c.errorf("Failed to list tables: %v\n", err)
+		return err
+	}
+
+	// Client-side filtering (gateway may support this in the future)
+	var filtered []TableInfo
+	for _, t := range tables {
+		if capability != "" {
+			found := false
+			for _, cap := range t.Capabilities {
+				if strings.EqualFold(cap, capability) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		if constraint != "" {
+			found := false
+			for _, con := range t.Constraints {
+				if strings.EqualFold(con, constraint) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		filtered = append(filtered, t)
+	}
+
 	if c.jsonOutput {
 		return c.outputJSON(map[string]interface{}{
-			"tables":  []interface{}{},
-			"message": "gateway connection not yet implemented",
+			"tables": filtered,
 		})
 	}
 
-	c.println("No tables registered (gateway not connected)")
-	c.println("")
-	c.println("Note: Gateway connection not yet implemented.")
-	c.println("      Register tables with 'canonic table register <file.yaml>'")
+	if len(filtered) == 0 {
+		c.println("No tables registered")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	printTableHeader(w)
+	for _, t := range filtered {
+		fmt.Fprintf(w, "%s\t%s\t%s\t-\n",
+			t.Name,
+			strings.Join(t.Capabilities, ", "),
+			strings.Join(t.Constraints, ", "))
+	}
+	w.Flush()
 
 	return nil
 }
@@ -258,9 +349,24 @@ func (c *CLI) runTableDelete(tableName string, force bool) error {
 		}
 	}
 
-	// TODO: Send to gateway
-	c.println("Note: Gateway connection not yet implemented.")
+	// Per execution-checklist.md 4.2: CLI uses GatewayClient exclusively
+	client := c.newGatewayClient()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
+	if err := client.DeleteTable(ctx, tableName); err != nil {
+		c.errorf("Failed to delete table: %v\n", err)
+		return err
+	}
+
+	if c.jsonOutput {
+		return c.outputJSON(map[string]interface{}{
+			"status": "deleted",
+			"table":  tableName,
+		})
+	}
+
+	c.printf("✓ Table '%s' deleted\n", tableName)
 	return nil
 }
 

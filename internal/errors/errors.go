@@ -417,3 +417,63 @@ func NewBootstrapError(message, reason, suggestion string) *ErrBootstrapError {
 		},
 	}
 }
+
+// ErrMigrationFailed is returned when a database migration fails.
+// Per execution-checklist.md 4.4: Gateway fails startup on migration failure.
+type ErrMigrationFailed struct {
+	CanonicError
+	Migration string
+}
+
+// NewMigrationFailed creates an error for migration failures.
+func NewMigrationFailed(migration string, cause error) *ErrMigrationFailed {
+	return &ErrMigrationFailed{
+		CanonicError: CanonicError{
+			Code:       CodeInternal,
+			Message:    fmt.Sprintf("migration failed: %s", migration),
+			Reason:     cause.Error(),
+			Suggestion: "check database connection and migration file syntax",
+			Cause:      cause,
+		},
+		Migration: migration,
+	}
+}
+
+// ErrPlannerError is returned when query planning fails.
+// Per phase-8-spec.md: Planner errors are explicit and actionable.
+type ErrPlannerError struct {
+	CanonicError
+}
+
+// NewPlannerError creates an error for planner failures.
+func NewPlannerError(reason string) *ErrPlannerError {
+	return &ErrPlannerError{
+		CanonicError: CanonicError{
+			Code:       CodeValidation,
+			Message:    "query planning failed",
+			Reason:     reason,
+			Suggestion: "check query syntax and ensure all referenced tables exist",
+		},
+	}
+}
+
+// ErrCrossEngineQuery is returned when a query spans multiple engines.
+// Per phase-9-spec.md: Cross-engine queries require federation.
+type ErrCrossEngineQuery struct {
+	CanonicError
+	Engines []string
+}
+
+// NewCrossEngineQuery creates an error for cross-engine queries.
+// This error signals that federation is needed.
+func NewCrossEngineQuery(engines []string) *ErrCrossEngineQuery {
+	return &ErrCrossEngineQuery{
+		CanonicError: CanonicError{
+			Code:       CodeValidation,
+			Message:    "query spans multiple engines",
+			Reason:     fmt.Sprintf("query references tables on engines: %v", engines),
+			Suggestion: "enable federation or ensure all tables use the same engine",
+		},
+		Engines: engines,
+	}
+}

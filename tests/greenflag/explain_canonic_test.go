@@ -46,8 +46,9 @@ func TestExplainCanonic_MatchesExecutionRouting(t *testing.T) {
 	authz.GrantAccess("analyst", "analytics.sales_orders", capabilities.CapabilityRead)
 
 	adapterRegistry := adapters.NewAdapterRegistry()
+	adapterRegistry.Register(gateway.NewMockAdapter("duckdb", []capabilities.Capability{capabilities.CapabilityRead}))
 
-	gw := gateway.NewGateway(
+	gw, err := gateway.NewGateway(
 		auth.NewStaticTokenAuthenticator(),
 		tableRegistry,
 		engineRouter,
@@ -57,6 +58,9 @@ func TestExplainCanonic_MatchesExecutionRouting(t *testing.T) {
 			Authorization: authz,
 		},
 	)
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

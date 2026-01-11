@@ -65,7 +65,10 @@ func TestReadyzReturnsOKWhenAllReady(t *testing.T) {
 	adapterRegistry.Register(&mockAdapter{name: "test-engine"})
 
 	cfg := gateway.Config{Version: "test"}
-	gw := gateway.NewGateway(authenticator, tableRegistry, engineRouter, adapterRegistry, cfg)
+	gw, err := gateway.NewGateway(authenticator, tableRegistry, engineRouter, adapterRegistry, cfg)
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	w := httptest.NewRecorder()
@@ -158,5 +161,6 @@ func (m *mockAdapter) Capabilities() []capabilities.Capability {
 func (m *mockAdapter) Execute(ctx context.Context, plan *planner.ExecutionPlan) (*adapters.QueryResult, error) {
 	return nil, nil
 }
-func (m *mockAdapter) Ping(ctx context.Context) error { return nil }
-func (m *mockAdapter) Close() error                   { return nil }
+func (m *mockAdapter) Ping(ctx context.Context) error        { return nil }
+func (m *mockAdapter) Close() error                          { return nil }
+func (m *mockAdapter) CheckHealth(ctx context.Context) error { return nil }

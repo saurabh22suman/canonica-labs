@@ -2,6 +2,7 @@
 // This includes the TableRepository for virtual table CRUD operations.
 //
 // Per docs/plan.md: "PostgreSQL for virtual tables, capabilities, constraints, routing rules, audit logs."
+// Per execution-checklist.md: "Planner reads tables, roles, constraints **only** from repository"
 package storage
 
 import (
@@ -16,6 +17,9 @@ import (
 // - Thread-safe
 // - Context-aware (respecting cancellation/timeout)
 // - Explicit about errors (never swallow)
+//
+// Per execution-checklist.md 4.1: Repository is mandatory in gateway constructor.
+// The Gateway and Planner MUST use this interface for all table operations.
 type TableRepository interface {
 	// Create registers a new virtual table.
 	// Returns an error if:
@@ -53,6 +57,11 @@ type TableRepository interface {
 	// Returns an error if:
 	// - Context is cancelled
 	Exists(ctx context.Context, name string) (bool, error)
+
+	// CheckConnectivity verifies database connectivity.
+	// Per phase-3-spec.md §7: "Add startup checks to verify database connectivity"
+	// Per execution-checklist.md 4.1: "Gateway startup fails if PostgreSQL is unavailable"
+	CheckConnectivity(ctx context.Context) error
 }
 
 // DetectMetadataConflict checks if two repositories have conflicting definitions for a table.

@@ -119,8 +119,8 @@ func TestErrorClassificationIsDeterministic(t *testing.T) {
 			query: "SELECT 1; SELECT 2",
 		},
 		{
-			name:  "CTE query",
-			query: "WITH t AS (SELECT 1) SELECT * FROM t",
+			name:  "Window function",
+			query: "SELECT ROW_NUMBER() OVER (ORDER BY id) FROM test.orders",
 		},
 	}
 
@@ -149,14 +149,14 @@ func TestErrorClassificationIsDeterministic(t *testing.T) {
 func TestSameQuerySameError(t *testing.T) {
 	parser := sql.NewParser()
 
-	// Test with a known-unsupported query
-	query := "WITH cte AS (SELECT 1) SELECT * FROM cte"
+	// Test with a known-unsupported query (window function)
+	query := "SELECT ROW_NUMBER() OVER (ORDER BY id) FROM test.orders"
 
 	errors := make([]string, 10)
 	for i := 0; i < 10; i++ {
 		_, err := parser.Parse(query)
 		if err == nil {
-			t.Fatalf("CTE query should be rejected")
+			t.Fatalf("Window function query should be rejected")
 		}
 		errors[i] = err.Error()
 	}
@@ -166,6 +166,22 @@ func TestSameQuerySameError(t *testing.T) {
 		if errors[i] != errors[0] {
 			t.Errorf("Error messages must be identical:\nExpected: %s\nGot: %s", errors[0], errors[i])
 		}
+	}
+}
+
+// TestCTEsAreNowAccepted tests that CTE queries are now properly parsed (T013).
+func TestCTEsAreNowAccepted(t *testing.T) {
+	parser := sql.NewParser()
+
+	query := "WITH cte AS (SELECT 1) SELECT * FROM cte"
+
+	plan, err := parser.Parse(query)
+	if err != nil {
+		t.Fatalf("CTE query should now be accepted, got error: %v", err)
+	}
+
+	if plan == nil {
+		t.Fatal("Expected non-nil plan for CTE query")
 	}
 }
 

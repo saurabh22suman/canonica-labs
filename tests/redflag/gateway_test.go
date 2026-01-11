@@ -206,9 +206,9 @@ func TestGateway_RejectsQueryWithoutCapability(t *testing.T) {
 
 	gw.ServeHTTP(rec, req)
 
-	// Capability violations should return 400
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 Bad Request for capability violation, got %d", rec.Code)
+	// Capability violations return 403 Forbidden (user lacks TIME_TRAVEL capability on this table)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for capability violation, got %d", rec.Code)
 	}
 
 	var resp gateway.ErrorResponse

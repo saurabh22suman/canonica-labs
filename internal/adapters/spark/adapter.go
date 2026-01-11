@@ -265,3 +265,51 @@ func (a *Adapter) Close() error {
 
 	return nil
 }
+
+// CheckHealth validates Spark Thrift Server connectivity.
+// Per phase-6-spec.md: Health check validates server is reachable.
+// Since Spark MVP lacks full driver, we verify TCP reachability.
+// Returns nil if healthy, error with details if unhealthy.
+func (a *Adapter) CheckHealth(ctx context.Context) error {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	if a.closed {
+		return fmt.Errorf("Spark adapter: connection is closed")
+	}
+
+	if a.config.Host == "" {
+		return fmt.Errorf("Spark adapter: host is not configured")
+	}
+
+	// Create timeout context for health check
+	healthCtx, cancel := context.WithTimeout(ctx, a.config.ConnectionTimeout)
+	defer cancel()
+
+	// If we have a database connection, use it for health check
+	if a.db != nil {
+		var result int
+		err := a.db.QueryRowContext(healthCtx, "SELECT 1").Scan(&result)
+		if err != nil {
+			return fmt.Errorf("Spark adapter health check failed: %w", err)
+		}
+		if result != 1 {
+			return fmt.Errorf("Spark adapter health check: unexpected result %d", result)
+		}
+		return nil
+	}
+
+	// Fall back to TCP connectivity check for MVP
+	address := fmt.Sprintf("%s:%d", a.config.Host, a.config.Port)
+	dialer := &net.Dialer{
+		Timeout: 5 * time.Second,
+	}
+
+	conn, err := dialer.DialContext(healthCtx, "tcp", address)
+	if err != nil {
+		return fmt.Errorf("Spark adapter health check: cannot reach server at %s: %w", address, err)
+	}
+	conn.Close()
+
+	return nil
+}

@@ -193,3 +193,67 @@ func TestSnapshotConsistent_AcceptsMultipleSnapshotTables(t *testing.T) {
 		t.Fatal("expected non-nil execution plan")
 	}
 }
+
+// TestSnapshotConsistent_AcceptsSameTimestampPerTable proves that queries
+// joining SNAPSHOT_CONSISTENT tables with the SAME per-table timestamp succeed.
+//
+// Green-Flag: Same timestamps across SNAPSHOT_CONSISTENT tables is consistent.
+func TestSnapshotConsistent_AcceptsSameTimestampPerTable(t *testing.T) {
+	ctx := context.Background()
+
+	// Arrange: Two tables both with SNAPSHOT_CONSISTENT
+	registry := gateway.NewInMemoryTableRegistry()
+	registry.Register(&tables.VirtualTable{
+		Name:         "orders",
+		Capabilities: []capabilities.Capability{capabilities.CapabilityRead, capabilities.CapabilityTimeTravel},
+		Constraints:  []capabilities.Constraint{capabilities.ConstraintSnapshotConsistent},
+		Sources: []tables.PhysicalSource{{
+			Engine:   "iceberg-trino",
+			Location: "catalog.schema.orders",
+			Format:   "iceberg",
+		}},
+	})
+	registry.Register(&tables.VirtualTable{
+		Name:         "customers",
+		Capabilities: []capabilities.Capability{capabilities.CapabilityRead, capabilities.CapabilityTimeTravel},
+		Constraints:  []capabilities.Constraint{capabilities.ConstraintSnapshotConsistent},
+		Sources: []tables.PhysicalSource{{
+			Engine:   "iceberg-trino",
+			Location: "catalog.schema.customers",
+			Format:   "iceberg",
+		}},
+	})
+
+	// Arrange: Router with TIME_TRAVEL capable engine
+	r := router.NewRouter()
+	r.RegisterEngine(&router.Engine{
+		Name:         "iceberg-trino",
+		Capabilities: []capabilities.Capability{capabilities.CapabilityRead, capabilities.CapabilityTimeTravel},
+		Available:    true,
+		Priority:     1,
+	})
+
+	p := planner.NewPlanner(registry, r)
+
+	// Act: Query joining both tables with SAME timestamp
+	parser := sql.NewParser()
+	plan, err := parser.Parse("SELECT * FROM orders FOR SYSTEM_TIME AS OF TIMESTAMP '2024-01-01T00:00:00Z' JOIN customers FOR SYSTEM_TIME AS OF TIMESTAMP '2024-01-01T00:00:00Z' ON orders.customer_id = customers.id")
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+
+	// Verify parser extracted per-table timestamps
+	if len(plan.TimeTravelPerTable) == 0 {
+		t.Fatal("expected TimeTravelPerTable to be populated, got empty map")
+	}
+
+	// Assert: Planning should succeed with same timestamps
+	execPlan, planErr := p.Plan(ctx, plan)
+	if planErr != nil {
+		t.Fatalf("expected planning to succeed for SNAPSHOT_CONSISTENT tables with same timestamps, got: %v", planErr)
+	}
+
+	if execPlan == nil {
+		t.Fatal("expected non-nil execution plan")
+	}
+}

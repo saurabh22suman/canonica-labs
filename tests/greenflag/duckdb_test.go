@@ -237,3 +237,49 @@ func TestDuckDB_ResultMetadata(t *testing.T) {
 		t.Fatal("expected metadata to be non-nil")
 	}
 }
+
+// Phase 6 Green-Flag Tests: Health Check
+// Per phase-6-spec.md: Verify health check works for healthy adapters
+
+// TestDuckDB_CheckHealthSucceedsOnHealthyAdapter verifies CheckHealth succeeds.
+// Green-Flag: Healthy adapters must report healthy via CheckHealth.
+func TestDuckDB_CheckHealthSucceedsOnHealthyAdapter(t *testing.T) {
+	adapter := duckdb.NewAdapter()
+	defer adapter.Close()
+
+	err := adapter.CheckHealth(context.Background())
+	if err != nil {
+		t.Fatalf("expected healthy adapter to pass CheckHealth, got: %v", err)
+	}
+}
+
+// TestDuckDB_CheckHealthExecutesSelect1 verifies CheckHealth actually queries the database.
+// Green-Flag: Health check must verify actual database connectivity, not just struct state.
+func TestDuckDB_CheckHealthExecutesSelect1(t *testing.T) {
+	adapter := duckdb.NewAdapter()
+	defer adapter.Close()
+
+	// First verify the adapter is working
+	plan := &planner.ExecutionPlan{
+		LogicalPlan: &sql.LogicalPlan{
+			RawSQL:    "SELECT 1 AS health",
+			Operation: capabilities.OperationSelect,
+		},
+		Engine: "duckdb",
+	}
+
+	result, err := adapter.Execute(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result.RowCount != 1 {
+		t.Fatalf("expected 1 row, got %d", result.RowCount)
+	}
+
+	// Now verify CheckHealth also works
+	err = adapter.CheckHealth(context.Background())
+	if err != nil {
+		t.Fatalf("CheckHealth failed after successful Execute: %v", err)
+	}
+}

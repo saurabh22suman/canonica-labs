@@ -148,3 +148,62 @@ func TestTrino_ConfigDefaults(t *testing.T) {
 	// Should not panic with minimal config
 	_ = adapter.Name()
 }
+
+// Phase 6 Green-Flag Tests: Connection Pool and Health Check Configuration
+
+// TestTrino_ConnectionPoolDefaults verifies connection pool defaults are applied.
+// Green-Flag: Zero values should use sensible defaults per phase-6-spec.md.
+func TestTrino_ConnectionPoolDefaults(t *testing.T) {
+	// Create adapter with no pool configuration
+	adapter := trino.NewAdapter(trino.AdapterConfig{
+		Host: "localhost",
+		Port: 8080,
+	})
+	defer adapter.Close()
+
+	// Adapter should be created successfully with defaults
+	if adapter.Name() != "trino" {
+		t.Fatalf("expected name 'trino', got %q", adapter.Name())
+	}
+
+	caps := adapter.Capabilities()
+	if len(caps) == 0 {
+		t.Fatal("expected capabilities to be set")
+	}
+}
+
+// TestTrino_ConnectionPoolConfig verifies custom pool settings are accepted.
+// Green-Flag: Custom pool configuration should be accepted without error.
+func TestTrino_ConnectionPoolConfig(t *testing.T) {
+	config := trino.AdapterConfig{
+		Host:            "localhost",
+		Port:            8080,
+		MaxOpenConns:    20,
+		MaxIdleConns:    10,
+		ConnMaxLifetime: 10 * 60 * 1e9, // 10 minutes in nanoseconds (time.Duration)
+		ConnMaxIdleTime: 2 * 60 * 1e9,  // 2 minutes
+		ConnectTimeout:  30 * 1e9,      // 30 seconds
+		QueryTimeout:    10 * 60 * 1e9, // 10 minutes
+	}
+	adapter := trino.NewAdapter(config)
+	defer adapter.Close()
+
+	// Verify adapter was created with custom config
+	if adapter.Name() != "trino" {
+		t.Fatalf("expected name 'trino', got %q", adapter.Name())
+	}
+}
+
+// TestTrino_CheckHealthMethodExists verifies CheckHealth is available.
+// Green-Flag: Adapter must expose CheckHealth per phase-6-spec.md.
+func TestTrino_CheckHealthMethodExists(t *testing.T) {
+	adapter := trino.NewAdapter(trino.AdapterConfig{
+		Host: "localhost",
+		Port: 8080,
+	})
+	defer adapter.Close()
+
+	// Just verify method exists and can be called
+	// Error is expected since no actual Trino server is running
+	_ = adapter.CheckHealth(context.Background())
+}

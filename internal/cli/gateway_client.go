@@ -120,6 +120,56 @@ func (c *GatewayClient) ListTables(ctx context.Context) ([]TableInfo, error) {
 	return result.Tables, nil
 }
 
+// RegisterTableRequest represents a table registration request.
+type RegisterTableRequest struct {
+	Name         string       `json:"name"`
+	Description  string       `json:"description,omitempty"`
+	Sources      []SourceInfo `json:"sources"`
+	Capabilities []string     `json:"capabilities"`
+	Constraints  []string     `json:"constraints,omitempty"`
+}
+
+// RegisterTable registers a new table with the gateway.
+// Per execution-checklist.md 4.2: CLI uses GatewayClient exclusively.
+func (c *GatewayClient) RegisterTable(ctx context.Context, req *RegisterTableRequest) error {
+	if c.endpoint == "" {
+		return errors.NewGatewayUnavailable("", "no gateway endpoint configured")
+	}
+
+	body, _ := json.Marshal(req)
+	resp, err := c.doRequest(ctx, "POST", "/tables", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return c.parseErrorResponse(resp)
+	}
+
+	return nil
+}
+
+// DeleteTable deletes a table from the gateway.
+// Per execution-checklist.md 4.2: CLI uses GatewayClient exclusively.
+func (c *GatewayClient) DeleteTable(ctx context.Context, tableName string) error {
+	if c.endpoint == "" {
+		return errors.NewGatewayUnavailable("", "no gateway endpoint configured")
+	}
+
+	resp, err := c.doRequest(ctx, "DELETE", "/tables/"+tableName, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return c.parseErrorResponse(resp)
+	}
+
+	return nil
+}
+
 // DescribeTable retrieves detailed information about a table.
 // Per phase-3-spec.md §8: "canonic table describe"
 func (c *GatewayClient) DescribeTable(ctx context.Context, tableName string) (*TableDetail, error) {
@@ -221,6 +271,38 @@ func (c *GatewayClient) ExecuteQuery(ctx context.Context, sql string) (*QueryRes
 	}
 
 	return &result, nil
+}
+
+// HealthInfo represents the health response from the gateway.
+type HealthInfo struct {
+	Status    string `json:"status"`
+	Version   string `json:"version"`
+	Timestamp string `json:"timestamp"`
+}
+
+// GetHealthInfo retrieves health information including server version.
+// Per tracker.md T012: CLI server version check.
+func (c *GatewayClient) GetHealthInfo(ctx context.Context) (*HealthInfo, error) {
+	if c.endpoint == "" {
+		return nil, errors.NewGatewayUnavailable("", "no gateway endpoint configured")
+	}
+
+	resp, err := c.doRequest(ctx, "GET", "/health", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseErrorResponse(resp)
+	}
+
+	var health HealthInfo
+	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+		return nil, fmt.Errorf("failed to decode health response: %w", err)
+	}
+
+	return &health, nil
 }
 
 // CheckHealth verifies gateway connectivity.

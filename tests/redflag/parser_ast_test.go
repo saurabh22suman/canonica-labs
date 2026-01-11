@@ -285,10 +285,8 @@ func TestParser_ExtractsUnionTables(t *testing.T) {
 // TestParser_ExtractsCTETables proves that WITH (CTE) tables are extracted.
 //
 // Red-Flag: CTEs reference real tables that must be resolved.
-// NOTE: vitess/sqlparser v0.0.0-20180606152119 does not support CTEs.
-// This test documents the limitation and should be revisited when upgrading.
+// Now supported via dolthub/vitess parser (T013).
 func TestParser_ExtractsCTETables(t *testing.T) {
-	t.Skip("KNOWN LIMITATION: vitess/sqlparser does not support CTE (WITH clause) - see tracker.md T013")
 	parser := sql.NewParser()
 
 	query := `

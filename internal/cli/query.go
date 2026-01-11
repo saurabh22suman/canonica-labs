@@ -1,13 +1,12 @@
 package cli
 
 import (
+	"context"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
-
-	"github.com/canonica-labs/canonica/internal/capabilities"
-	"github.com/canonica-labs/canonica/internal/router"
-	"github.com/canonica-labs/canonica/internal/sql"
 )
 
 func (c *CLI) newQueryCmd() *cobra.Command {
@@ -43,9 +42,13 @@ Example:
 }
 
 func (c *CLI) runQueryExec(sqlQuery string) error {
-	// First, validate and parse the query
-	parser := sql.NewParser()
-	plan, err := parser.Parse(sqlQuery)
+	// Per execution-checklist.md 4.2: CLI uses GatewayClient exclusively
+	// No local parsing - all validation happens on the gateway
+	client := c.newGatewayClient()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := client.ExecuteQuery(ctx, sqlQuery)
 	if err != nil {
 		if c.jsonOutput {
 			return c.outputJSON(map[string]interface{}{
@@ -53,34 +56,43 @@ func (c *CLI) runQueryExec(sqlQuery string) error {
 				"error":   err.Error(),
 			})
 		}
-		c.errorf("Query rejected: %v\n", err)
+		c.errorf("Query failed: %v\n", err)
 		return err
 	}
 
-	c.debugf("Parsed query: %+v\n", plan)
-
-	// TODO: Send to gateway for execution
-	// For now, show what would happen
 	if c.jsonOutput {
-		return c.outputJSON(map[string]interface{}{
-			"success":   false,
-			"message":   "gateway execution not yet implemented",
-			"operation": plan.Operation,
-			"tables":    plan.Tables,
-		})
+		return c.outputJSON(result)
 	}
 
-	c.println("Query parsed successfully:")
-	c.printf("  Operation: %s\n", plan.Operation)
-	c.printf("  Tables: %s\n", strings.Join(plan.Tables, ", "))
-	if plan.HasTimeTravel {
-		c.printf("  Time Travel: AS OF %s\n", plan.TimeTravelTimestamp)
+	c.printf("Query ID: %s\n", result.QueryID)
+	c.printf("Engine: %s\n", result.Engine)
+	c.printf("Duration: %s\n", result.Duration)
+	c.printf("Rows: %d\n", result.RowCount)
+
+	if len(result.Columns) > 0 && len(result.Rows) > 0 {
+		c.println("")
+		c.println(strings.Join(result.Columns, "\t"))
+		for _, row := range result.Rows {
+			var values []string
+			for _, col := range result.Columns {
+				if v, ok := row[col]; ok {
+					values = append(values, formatValue(v))
+				}
+			}
+			c.println(strings.Join(values, "\t"))
+		}
 	}
-	c.println("")
-	c.println("Note: Gateway execution not yet implemented.")
-	c.println("      Query validation passed - execution would proceed.")
 
 	return nil
+}
+
+// formatValue formats a value for display
+func formatValue(v interface{}) string {
+	if v == nil {
+		return "NULL"
+	}
+	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(
+		strings.ReplaceAll(fmt.Sprintf("%v", v), "\n", " "), "\t", " "), "  ", " "))
 }
 
 func (c *CLI) newQueryExplainCmd() *cobra.Command {
@@ -105,78 +117,51 @@ Example:
 }
 
 func (c *CLI) runQueryExplain(sqlQuery string) error {
-	// Parse the query
-	parser := sql.NewParser()
-	plan, err := parser.Parse(sqlQuery)
+	// Per execution-checklist.md 4.2: CLI uses GatewayClient exclusively
+	// No local parsing - all explanation happens on the gateway
+	client := c.newGatewayClient()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := client.ExplainQuery(ctx, sqlQuery)
 	if err != nil {
 		if c.jsonOutput {
 			return c.outputJSON(map[string]interface{}{
-				"valid":  false,
-				"error":  err.Error(),
-				"query":  sqlQuery,
+				"valid": false,
+				"error": err.Error(),
+				"query": sqlQuery,
 			})
 		}
-		c.errorf("Query rejected: %v\n", err)
+		c.errorf("Explain failed: %v\n", err)
 		return err
 	}
 
-	// Determine required capabilities
-	requiredCaps := []capabilities.Capability{capabilities.CapabilityRead}
-	if plan.HasTimeTravel {
-		requiredCaps = append(requiredCaps, capabilities.CapabilityTimeTravel)
-	}
-
-	// Get default router for engine selection
-	r := router.DefaultRouter()
-	engine, engineErr := r.SelectEngine(nil, requiredCaps)
-
-	explanation := QueryExplanation{
-		Query:                sqlQuery,
-		Valid:                true,
-		Operation:            string(plan.Operation),
-		Tables:               plan.Tables,
-		RequiredCapabilities: capabilitiesToStrings(requiredCaps),
-		HasTimeTravel:        plan.HasTimeTravel,
-	}
-
-	if engineErr == nil {
-		explanation.SelectedEngine = engine
-	} else {
-		explanation.EngineError = engineErr.Error()
-	}
-
 	if c.jsonOutput {
-		return c.outputJSON(explanation)
+		return c.outputJSON(result)
 	}
 
 	c.println("Query Explanation")
 	c.println("=================")
 	c.println("")
 	c.println("Query:")
-	c.printf("  %s\n", sqlQuery)
+	c.printf("  %s\n", result.SQL)
 	c.println("")
 	c.println("Analysis:")
-	c.printf("  Operation: %s\n", plan.Operation)
-	if len(plan.Tables) > 0 {
-		c.printf("  Tables: %s\n", strings.Join(plan.Tables, ", "))
+	if len(result.Tables) > 0 {
+		c.printf("  Tables: %s\n", strings.Join(result.Tables, ", "))
 	} else {
 		c.println("  Tables: (none detected)")
 	}
-	c.printf("  Time Travel: %v\n", plan.HasTimeTravel)
-	if plan.HasTimeTravel {
-		c.printf("  Timestamp: %s\n", plan.TimeTravelTimestamp)
+	if len(result.Capabilities) > 0 {
+		c.printf("  Capabilities: %s\n", strings.Join(result.Capabilities, ", "))
 	}
 	c.println("")
-	c.println("Requirements:")
-	c.printf("  Capabilities: %s\n", strings.Join(capabilitiesToStrings(requiredCaps), ", "))
-	c.println("")
 	c.println("Routing Decision:")
-	if engineErr == nil {
-		c.printf("  Selected Engine: %s\n", engine)
-		c.println("  Status: ✓ Query can be executed")
-	} else {
-		c.printf("  Error: %v\n", engineErr)
-		c.println("  Status: ✗ Query cannot be executed")
+	c.printf("  Selected Engine: %s\n", result.Engine)
+	if result.Plan != "" {
+		c.println("")
+		c.println("Execution Plan:")
+		c.printf("  %s\n", result.Plan)
 	}
 
 	return nil
@@ -201,8 +186,13 @@ Example:
 }
 
 func (c *CLI) runQueryValidate(sqlQuery string) error {
-	parser := sql.NewParser()
-	plan, err := parser.Parse(sqlQuery)
+	// Per execution-checklist.md 4.2: CLI uses GatewayClient exclusively
+	// No local parsing - all validation happens on the gateway
+	client := c.newGatewayClient()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := client.ValidateQuery(ctx, sqlQuery)
 	if err != nil {
 		if c.jsonOutput {
 			return c.outputJSON(map[string]interface{}{
@@ -211,62 +201,29 @@ func (c *CLI) runQueryValidate(sqlQuery string) error {
 				"errors": []string{err.Error()},
 			})
 		}
-		c.errorf("✗ Invalid: %v\n", err)
+		c.errorf("✗ Validation failed: %v\n", err)
 		return err
 	}
 
-	// Determine required capabilities
-	requiredCaps := []capabilities.Capability{capabilities.CapabilityRead}
-	if plan.HasTimeTravel {
-		requiredCaps = append(requiredCaps, capabilities.CapabilityTimeTravel)
-	}
-
-	// Check if any engine can handle this
-	r := router.DefaultRouter()
-	engine, engineErr := r.SelectEngine(nil, requiredCaps)
-
-	if engineErr != nil {
+	if !result.Valid {
 		if c.jsonOutput {
 			return c.outputJSON(map[string]interface{}{
 				"valid":  false,
 				"query":  sqlQuery,
-				"errors": []string{engineErr.Error()},
+				"errors": []string{result.Error},
 			})
 		}
-		c.errorf("✗ No engine available: %v\n", engineErr)
-		return engineErr
+		c.errorf("✗ Invalid: %s\n", result.Error)
+		return fmt.Errorf("validation failed: %s", result.Error)
 	}
 
 	if c.jsonOutput {
 		return c.outputJSON(map[string]interface{}{
-			"valid":     true,
-			"query":     sqlQuery,
-			"operation": plan.Operation,
-			"tables":    plan.Tables,
-			"engine":    engine,
+			"valid": true,
+			"query": sqlQuery,
 		})
 	}
 
-	c.printf("✓ Valid (would use engine: %s)\n", engine)
+	c.println("✓ Valid")
 	return nil
-}
-
-// QueryExplanation represents the JSON output for query explain.
-type QueryExplanation struct {
-	Query                string   `json:"query"`
-	Valid                bool     `json:"valid"`
-	Operation            string   `json:"operation"`
-	Tables               []string `json:"tables"`
-	RequiredCapabilities []string `json:"required_capabilities"`
-	HasTimeTravel        bool     `json:"has_time_travel"`
-	SelectedEngine       string   `json:"selected_engine,omitempty"`
-	EngineError          string   `json:"engine_error,omitempty"`
-}
-
-func capabilitiesToStrings(caps []capabilities.Capability) []string {
-	result := make([]string, len(caps))
-	for i, c := range caps {
-		result[i] = string(c)
-	}
-	return result
 }

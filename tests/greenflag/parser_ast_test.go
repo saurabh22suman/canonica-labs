@@ -284,10 +284,8 @@ func TestParser_HandlesQuotedIdentifiers(t *testing.T) {
 
 // TestParser_DetectsTimeTravel verifies AS OF clause is extracted.
 // This is a Green-Flag test: time travel syntax should be detected.
-// NOTE: vitess/sqlparser does not support FOR SYSTEM_TIME AS OF syntax (SQL:2011 temporal).
-// Time travel detection falls back to text search, but parsing fails on temporal syntax.
+// Now supported via dolthub/vitess parser with AS OF syntax (T014).
 func TestParser_DetectsTimeTravel(t *testing.T) {
-	t.Skip("KNOWN LIMITATION: vitess/sqlparser does not support FOR SYSTEM_TIME AS OF - see tracker.md T014")
 	parser := sql.NewParser()
 	tests := []struct {
 		name       string

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 
@@ -28,8 +29,36 @@ func (c *CLI) runVersion() error {
 		Arch:      runtime.GOARCH,
 	}
 
+	// Query server version if gateway endpoint is configured
+	var serverVersion string
+	var serverStatus string
+	if c.cfg != nil && c.cfg.Endpoint != "" {
+		client := c.newGatewayClient()
+		ctx := context.Background()
+		if health, err := client.GetHealthInfo(ctx); err == nil {
+			serverVersion = health.Version
+			serverStatus = health.Status
+		} else {
+			serverStatus = "unavailable"
+		}
+	} else {
+		serverStatus = "not configured"
+	}
+
 	if c.jsonOutput {
-		return c.outputJSON(info)
+		// Include server info in JSON output
+		output := struct {
+			VersionInfo
+			Server struct {
+				Version string `json:"version,omitempty"`
+				Status  string `json:"status"`
+			} `json:"server"`
+		}{
+			VersionInfo: info,
+		}
+		output.Server.Version = serverVersion
+		output.Server.Status = serverStatus
+		return c.outputJSON(output)
 	}
 
 	c.println("Canonica CLI")
@@ -39,10 +68,14 @@ func (c *CLI) runVersion() error {
 	c.printf("  Go Version: %s\n", info.GoVersion)
 	c.printf("  OS/Arch:    %s/%s\n", info.OS, info.Arch)
 
-	// TODO: Query server version when gateway is connected
 	c.println("")
 	c.println("Server:")
-	c.println("  Status: Not connected (gateway not implemented)")
+	if serverVersion != "" {
+		c.printf("  Version: %s\n", serverVersion)
+		c.printf("  Status:  %s\n", serverStatus)
+	} else {
+		c.printf("  Status: %s\n", serverStatus)
+	}
 
 	return nil
 }

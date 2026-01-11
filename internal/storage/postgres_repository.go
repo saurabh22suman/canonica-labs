@@ -389,5 +389,18 @@ func (r *PostgresRepository) Exists(ctx context.Context, name string) (bool, err
 	return exists, nil
 }
 
+// CheckConnectivity verifies database connectivity.
+// Per phase-3-spec.md §7: "Add startup checks to verify database connectivity"
+// Per execution-checklist.md 4.1: "Gateway startup fails if PostgreSQL is unavailable"
+func (r *PostgresRepository) CheckConnectivity(ctx context.Context) error {
+	if r.db == nil {
+		return errors.NewDatabaseUnavailable("database connection is nil")
+	}
+	if err := r.db.PingContext(ctx); err != nil {
+		return errors.NewDatabaseUnavailable(fmt.Sprintf("database ping failed: %v", err))
+	}
+	return nil
+}
+
 // Verify PostgresRepository implements TableRepository interface.
 var _ TableRepository = (*PostgresRepository)(nil)

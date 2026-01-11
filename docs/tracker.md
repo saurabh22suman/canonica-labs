@@ -50,11 +50,18 @@ Before implementing a deferred feature, check this document for context.
 ---
 
 ### [T005] Cross-Engine Joins
-- **Status**: Deferred
+- **Status**: Completed ✅
 - **Priority**: P3 (Low)
-- **Rationale**: Complex feature; not in MVP scope
-- **Context**: Allow queries that join tables across different engines. Requires query decomposition and result merging.
-- **Related**: `docs/plan.md` §Exclusions
+- **Rationale**: Phase 9 spec implemented with federation support
+- **Context**: Cross-engine query federation is now supported. Implementation includes:
+  - `ErrCrossEngineQuery` error type for explicit detection
+  - Planner cross-engine detection based on table format/engine preferences
+  - Gateway integration with `FederatedExecutor` when `EnableFederation=true`
+  - `GatewayAdapterBridge` to bridge gateway adapters to federation interface
+  - Red-Flag tests: `TestFederatedExecutor_MissingAdapter`, `TestFederatedExecutor_EngineUnavailable`, `TestPlanner_CrossEngineQueryRejected`
+  - Green-Flag test: `TestFederatedExecutor_CrossEngineSuccess`
+- **Related**: `docs/phase-9-spec.md`, `internal/federation/`, `internal/planner/planner.go`
+- **Completed**: 2025-01-15
 
 ---
 
@@ -116,11 +123,13 @@ Before implementing a deferred feature, check this document for context.
 ---
 
 ### [T012] CLI Server Version Check
-- **Status**: Deferred
+- **Status**: Completed ✅
 - **Priority**: P3 (Low)
-- **Rationale**: Nice-to-have for debugging version mismatches
-- **Context**: Query gateway for server version in `canonica version` command.
-- **Related**: `internal/cli/version.go:42`
+- **Rationale**: Enables debugging version mismatches between CLI and gateway
+- **Context**: CLI `canonica version` command now queries gateway `/health` endpoint to display server version and status. Supports both text and JSON output formats.
+- **Related**: `internal/cli/version.go`, `internal/cli/gateway_client.go:GetHealthInfo()`
+- **Completed**: 2026-01-11
+- **Implementation**: Added `GetHealthInfo()` method to GatewayClient; version command displays server info when gateway is configured
 
 ---
 
@@ -141,32 +150,35 @@ Before implementing a deferred feature, check this document for context.
 ---
 
 ### [T013] CTE (WITH clause) Support in SQL Parser
-- **Status**: Deferred
+- **Status**: Completed ✅
 - **Priority**: P2 (Medium)
-- **Rationale**: vitess/sqlparser v0.0.0-20180606152119 does not support CTE syntax
-- **Context**: Common Table Expressions (WITH clause) are not parseable by the current sqlparser version. Upgrade to newer vitess/sqlparser or use different parser if CTE support is needed. Test skipped: `tests/redflag/parser_ast_test.go:TestParser_ExtractsCTETables`
-- **Related**: `internal/sql/parser.go`, `tests/redflag/parser_ast_test.go`
-- **Workaround**: Rewrite queries without CTEs, or use subqueries instead
+- **Rationale**: Migrated from xwb1989/sqlparser to dolthub/vitess parser which fully supports CTEs
+- **Context**: Common Table Expressions (WITH clause) are now fully supported. The parser extracts underlying tables from CTE definitions and correctly excludes CTE aliases from the table list.
+- **Related**: `internal/sql/parser.go`, `tests/redflag/parser_ast_test.go:TestParser_ExtractsCTETables`
+- **Completed**: 2026-01-11
+- **Implementation**: `extractTablesFromSelectWithAsOf()` handles `Select.With` field
 
 ---
 
 ### [T014] FOR SYSTEM_TIME AS OF Support in SQL Parser
-- **Status**: Deferred
+- **Status**: Completed ✅
 - **Priority**: P2 (Medium)
-- **Rationale**: vitess/sqlparser does not support SQL:2011 temporal query syntax
-- **Context**: Time travel syntax (FOR SYSTEM_TIME AS OF) is not parseable by vitess/sqlparser. Time travel detection uses text search fallback, but queries with this syntax fail AST parsing. Test skipped: `tests/greenflag/parser_ast_test.go:TestParser_DetectsTimeTravel`
-- **Related**: `internal/sql/parser.go`, SNAPSHOT_CONSISTENT enforcement
-- **Workaround**: Use engine-native time travel syntax that avoids FOR SYSTEM_TIME clause, or pre-process query to extract and strip temporal clauses
+- **Rationale**: Migrated to dolthub/vitess parser which supports AS OF syntax via `AliasedTableExpr.AsOf` field
+- **Context**: Time travel syntax is now parsed via AST. The parser extracts `AsOf.Time` from table expressions and sets `HasTimeTravel` and `TimeTravelTimestamp` on the LogicalPlan.
+- **Related**: `internal/sql/parser.go`, `tests/greenflag/parser_ast_test.go:TestParser_DetectsTimeTravel`
+- **Completed**: 2026-01-11
+- **Implementation**: `extractTablesFromTableExprWithAsOf()` handles `AliasedTableExpr.AsOf`
 
 ---
 
 ### [T015] Per-Table AS OF Syntax Support
-- **Status**: Deferred
-- **Priority**: P3 (Low)
-- **Rationale**: Per-table time travel requires parser enhancements
-- **Context**: Detecting when different tables have different snapshot timestamps in a query (snapshot mismatch). Current parser can detect global AS OF but not per-table temporal clauses. Test skipped: `tests/redflag/snapshot_consistent_test.go:TestSnapshotConsistent_RejectsSnapshotMismatch`
-- **Related**: `internal/sql/parser.go`, `internal/planner/planner.go`
-- **Workaround**: Enforce that all SNAPSHOT_CONSISTENT tables in a query use the same global AS OF timestamp
+- **Status**: Completed ✅
+- **Priority**: P2 (Medium)
+- **Rationale**: Per-table time travel enables snapshot mismatch detection for SNAPSHOT_CONSISTENT tables
+- **Context**: Parser now extracts per-table timestamps via `LogicalPlan.TimeTravelPerTable` map. Planner validates that all SNAPSHOT_CONSISTENT tables use the same snapshot timestamp. Test `TestSnapshotConsistent_RejectsSnapshotMismatch` now enabled and passing.
+- **Related**: `internal/sql/parser.go`, `internal/planner/planner.go:checkSnapshotConsistency()`
+- **Completed**: 2026-01-11
+- **Implementation**: Added `TimeTravelPerTable map[string]string` to LogicalPlan; extraction functions propagate per-table timestamps; planner enforces timestamp consistency
 
 ---
 

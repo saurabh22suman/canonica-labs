@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/canonica-labs/canonica/internal/adapters"
 	"github.com/canonica-labs/canonica/internal/capabilities"
@@ -46,9 +47,29 @@ type AdapterConfig struct {
 
 	// SSLMode controls SSL/TLS: "", "disable", "require"
 	SSLMode string
+
+	// Connection pool settings per phase-6-spec.md
+	// MaxOpenConns is the maximum number of open connections. Default: 10.
+	MaxOpenConns int
+
+	// MaxIdleConns is the maximum number of idle connections. Default: 5.
+	MaxIdleConns int
+
+	// ConnMaxLifetime is the maximum lifetime of a connection. Default: 5 minutes.
+	ConnMaxLifetime time.Duration
+
+	// ConnMaxIdleTime is the maximum idle time of a connection. Default: 1 minute.
+	ConnMaxIdleTime time.Duration
+
+	// ConnectTimeout is the timeout for establishing connections. Default: 10 seconds.
+	ConnectTimeout time.Duration
+
+	// QueryTimeout is the default query timeout. Default: 5 minutes.
+	QueryTimeout time.Duration
 }
 
 // NewAdapter creates a new Trino adapter with the given configuration.
+// Per phase-6-spec.md: Configures connection pooling and validates settings.
 func NewAdapter(config AdapterConfig) *Adapter {
 	// Apply defaults
 	if config.User == "" {
@@ -59,6 +80,26 @@ func NewAdapter(config AdapterConfig) *Adapter {
 	}
 	if config.Schema == "" {
 		config.Schema = "default"
+	}
+
+	// Apply connection pool defaults per phase-6-spec.md
+	if config.MaxOpenConns <= 0 {
+		config.MaxOpenConns = 10
+	}
+	if config.MaxIdleConns <= 0 {
+		config.MaxIdleConns = 5
+	}
+	if config.ConnMaxLifetime <= 0 {
+		config.ConnMaxLifetime = 5 * time.Minute
+	}
+	if config.ConnMaxIdleTime <= 0 {
+		config.ConnMaxIdleTime = 1 * time.Minute
+	}
+	if config.ConnectTimeout <= 0 {
+		config.ConnectTimeout = 10 * time.Second
+	}
+	if config.QueryTimeout <= 0 {
+		config.QueryTimeout = 5 * time.Minute
 	}
 
 	// Build DSN
@@ -86,6 +127,12 @@ func NewAdapter(config AdapterConfig) *Adapter {
 			closed: true,
 		}
 	}
+
+	// Configure connection pool per phase-6-spec.md
+	db.SetMaxOpenConns(config.MaxOpenConns)
+	db.SetMaxIdleConns(config.MaxIdleConns)
+	db.SetConnMaxLifetime(config.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(config.ConnMaxIdleTime)
 
 	return &Adapter{
 		db:     db,
@@ -223,6 +270,39 @@ func (a *Adapter) Close() error {
 
 	if a.db != nil {
 		return a.db.Close()
+	}
+
+	return nil
+}
+
+// CheckHealth validates the connection by executing SELECT 1.
+// Per phase-6-spec.md: Health check uses simple query validation.
+// Returns nil if healthy, error with details if unhealthy.
+func (a *Adapter) CheckHealth(ctx context.Context) error {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	if a.closed {
+		return fmt.Errorf("Trino adapter: connection is closed")
+	}
+
+	if a.db == nil {
+		return fmt.Errorf("Trino adapter: no database connection")
+	}
+
+	// Create timeout context for health check
+	healthCtx, cancel := context.WithTimeout(ctx, a.config.ConnectTimeout)
+	defer cancel()
+
+	// Execute SELECT 1 as health check
+	var result int
+	err := a.db.QueryRowContext(healthCtx, "SELECT 1").Scan(&result)
+	if err != nil {
+		return fmt.Errorf("Trino adapter health check failed: %w", err)
+	}
+
+	if result != 1 {
+		return fmt.Errorf("Trino adapter health check: unexpected result %d", result)
 	}
 
 	return nil

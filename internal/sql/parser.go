@@ -1,5 +1,7 @@
 // Package sql provides SQL parsing utilities for the canonica gateway.
-// Uses vitess/sqlparser to parse SQL and extract relevant information.
+// Uses dolthub/vitess sqlparser (enhanced fork) for SQL parsing with support for:
+// - CTEs (WITH clause) - T013
+// - Time-travel queries (AS OF) - T014
 //
 // Per docs/plan.md: MVP supports read-only SELECT queries only.
 package sql
@@ -9,7 +11,7 @@ import (
 
 	"github.com/canonica-labs/canonica/internal/capabilities"
 	"github.com/canonica-labs/canonica/internal/errors"
-	"github.com/xwb1989/sqlparser"
+	"github.com/dolthub/vitess/go/vt/sqlparser"
 )
 
 // LogicalPlan represents a parsed SQL query's logical structure.
@@ -26,8 +28,13 @@ type LogicalPlan struct {
 	// HasTimeTravel indicates if the query uses time-travel (AS OF).
 	HasTimeTravel bool
 
-	// TimeTravelTimestamp is the AS OF timestamp if HasTimeTravel is true.
+	// TimeTravelTimestamp is the global AS OF timestamp if HasTimeTravel is true.
+	// Deprecated: Use TimeTravelPerTable for per-table timestamps.
 	TimeTravelTimestamp string
+
+	// TimeTravelPerTable maps table names to their AS OF timestamps.
+	// Per tracker.md T015: Enables per-table snapshot consistency validation.
+	TimeTravelPerTable map[string]string
 }
 
 // Parser parses SQL queries into logical plans.
@@ -82,15 +89,18 @@ func (p *Parser) Parse(sql string) (*LogicalPlan, error) {
 	// Determine operation type and validate
 	var op capabilities.OperationType
 	var tables []string
+	var hasTimeTravel bool
+	var timestamp string
+	var perTableTimestamps map[string]string
 
 	switch s := stmt.(type) {
 	case *sqlparser.Select:
 		op = capabilities.OperationSelect
-		tables = extractTablesFromSelect(s)
+		tables, hasTimeTravel, timestamp, perTableTimestamps = extractTablesFromSelectWithAsOf(s)
 
-	case *sqlparser.Union:
+	case *sqlparser.SetOp:
 		op = capabilities.OperationSelect
-		tables = extractTablesFromUnion(s)
+		tables, hasTimeTravel, timestamp, perTableTimestamps = extractTablesFromUnionWithAsOf(s)
 
 	case *sqlparser.Insert:
 		op = capabilities.OperationInsert
@@ -130,9 +140,11 @@ func (p *Parser) Parse(sql string) (*LogicalPlan, error) {
 			"only SELECT queries are supported in MVP")
 	}
 
-	// Check for time-travel syntax (AS OF)
-	// Note: vitess/sqlparser doesn't natively support AS OF, so we fallback to text search
-	hasTimeTravel, timestamp := detectTimeTravel(sql)
+	// Fallback: Also check for time-travel syntax via text search for edge cases
+	// where AST parsing might not capture all temporal syntax variations
+	if !hasTimeTravel {
+		hasTimeTravel, timestamp = detectTimeTravel(sql)
+	}
 
 	return &LogicalPlan{
 		RawSQL:              sql,
@@ -140,7 +152,190 @@ func (p *Parser) Parse(sql string) (*LogicalPlan, error) {
 		Tables:              tables,
 		HasTimeTravel:       hasTimeTravel,
 		TimeTravelTimestamp: timestamp,
+		TimeTravelPerTable:  perTableTimestamps,
 	}, nil
+}
+
+// extractTablesFromSelectWithAsOf extracts tables and AS OF from a SELECT statement.
+// This is the enhanced version that returns time-travel information from AST.
+// Also extracts tables from CTEs (WITH clause).
+// Returns per-table timestamps for T015 snapshot consistency validation.
+func extractTablesFromSelectWithAsOf(sel *sqlparser.Select) (tables []string, hasTimeTravel bool, timestamp string, perTable map[string]string) {
+	seen := make(map[string]bool)
+	cteNames := make(map[string]bool) // Track CTE names to exclude from final table list
+	perTable = make(map[string]string)
+
+	// Extract tables from CTEs (WITH clause) first
+	if sel.With != nil {
+		for _, cte := range sel.With.Ctes {
+			// Record CTE name to exclude later (it's not a real table)
+			if cte.As.String() != "" {
+				cteNames[cte.As.String()] = true
+			}
+			// Extract underlying tables from CTE definition
+			if cte.Expr != nil {
+				if subquery, ok := cte.Expr.(*sqlparser.Subquery); ok {
+					extractTablesFromSelectStatementWithAsOf(subquery.Select, &tables, seen, &hasTimeTravel, &timestamp, perTable)
+				}
+			}
+		}
+	}
+
+	// Extract from FROM clause
+	for _, tableExpr := range sel.From {
+		extractTablesFromTableExprWithAsOf(tableExpr, &tables, seen, &hasTimeTravel, &timestamp, perTable)
+	}
+
+	// Extract from WHERE clause (subqueries)
+	if sel.Where != nil {
+		extractTablesFromExprWithAsOf(sel.Where.Expr, &tables, seen, &hasTimeTravel, &timestamp, perTable)
+	}
+
+	// Extract from HAVING clause (subqueries)
+	if sel.Having != nil {
+		extractTablesFromExprWithAsOf(sel.Having.Expr, &tables, seen, &hasTimeTravel, &timestamp, perTable)
+	}
+
+	// Extract from SELECT expressions (subqueries)
+	for _, expr := range sel.SelectExprs {
+		if aliased, ok := expr.(*sqlparser.AliasedExpr); ok {
+			extractTablesFromExprWithAsOf(aliased.Expr, &tables, seen, &hasTimeTravel, &timestamp, perTable)
+		}
+	}
+
+	// Filter out CTE names from the table list (they're not real tables)
+	filteredTables := make([]string, 0, len(tables))
+	for _, t := range tables {
+		if !cteNames[t] {
+			filteredTables = append(filteredTables, t)
+		}
+	}
+
+	return filteredTables, hasTimeTravel, timestamp, perTable
+}
+
+// extractTablesFromUnionWithAsOf extracts tables and AS OF from a UNION statement.
+func extractTablesFromUnionWithAsOf(union *sqlparser.SetOp) (tables []string, hasTimeTravel bool, timestamp string, perTable map[string]string) {
+	seen := make(map[string]bool)
+	perTable = make(map[string]string)
+
+	// Extract from left side
+	extractTablesFromSelectStatementWithAsOf(union.Left, &tables, seen, &hasTimeTravel, &timestamp, perTable)
+
+	// Extract from right side
+	extractTablesFromSelectStatementWithAsOf(union.Right, &tables, seen, &hasTimeTravel, &timestamp, perTable)
+
+	return tables, hasTimeTravel, timestamp, perTable
+}
+
+// extractTablesFromSelectStatementWithAsOf extracts tables from any SelectStatement with AS OF tracking.
+func extractTablesFromSelectStatementWithAsOf(stmt sqlparser.SelectStatement, tables *[]string, seen map[string]bool, hasTimeTravel *bool, timestamp *string, perTable map[string]string) {
+	switch s := stmt.(type) {
+	case *sqlparser.Select:
+		// Handle CTEs
+		if s.With != nil {
+			for _, cte := range s.With.Ctes {
+				if cte.Expr != nil {
+					if subquery, ok := cte.Expr.(*sqlparser.Subquery); ok {
+						extractTablesFromSelectStatementWithAsOf(subquery.Select, tables, seen, hasTimeTravel, timestamp, perTable)
+					}
+				}
+			}
+		}
+		for _, tableExpr := range s.From {
+			extractTablesFromTableExprWithAsOf(tableExpr, tables, seen, hasTimeTravel, timestamp, perTable)
+		}
+		if s.Where != nil {
+			extractTablesFromExprWithAsOf(s.Where.Expr, tables, seen, hasTimeTravel, timestamp, perTable)
+		}
+	case *sqlparser.SetOp:
+		extractTablesFromSelectStatementWithAsOf(s.Left, tables, seen, hasTimeTravel, timestamp, perTable)
+		extractTablesFromSelectStatementWithAsOf(s.Right, tables, seen, hasTimeTravel, timestamp, perTable)
+	case *sqlparser.ParenSelect:
+		extractTablesFromSelectStatementWithAsOf(s.Select, tables, seen, hasTimeTravel, timestamp, perTable)
+	}
+}
+
+// extractTablesFromTableExprWithAsOf extracts table names and AS OF from a table expression.
+func extractTablesFromTableExprWithAsOf(expr sqlparser.TableExpr, tables *[]string, seen map[string]bool, hasTimeTravel *bool, timestamp *string, perTable map[string]string) {
+	switch t := expr.(type) {
+	case *sqlparser.AliasedTableExpr:
+		// Extract table name first so we can record per-table timestamp
+		var tableName string
+		switch e := t.Expr.(type) {
+		case sqlparser.TableName:
+			tableName = formatTableName(e)
+			if tableName != "" && !seen[tableName] {
+				*tables = append(*tables, tableName)
+				seen[tableName] = true
+			}
+		case *sqlparser.Subquery:
+			extractTablesFromSelectStatementWithAsOf(e.Select, tables, seen, hasTimeTravel, timestamp, perTable)
+		}
+		// Check for AS OF on this table - record per-table timestamp
+		if t.AsOf != nil && t.AsOf.Time != nil {
+			*hasTimeTravel = true
+			ts := sqlparser.String(t.AsOf.Time)
+			*timestamp = ts
+			// T015: Record per-table timestamp for snapshot consistency validation
+			if tableName != "" && perTable != nil {
+				perTable[tableName] = ts
+			}
+		}
+	case *sqlparser.JoinTableExpr:
+		extractTablesFromTableExprWithAsOf(t.LeftExpr, tables, seen, hasTimeTravel, timestamp, perTable)
+		extractTablesFromTableExprWithAsOf(t.RightExpr, tables, seen, hasTimeTravel, timestamp, perTable)
+	case *sqlparser.ParenTableExpr:
+		for _, tableExpr := range t.Exprs {
+			extractTablesFromTableExprWithAsOf(tableExpr, tables, seen, hasTimeTravel, timestamp, perTable)
+		}
+	}
+}
+
+// extractTablesFromExprWithAsOf extracts tables from expressions (subqueries) with AS OF tracking.
+func extractTablesFromExprWithAsOf(expr sqlparser.Expr, tables *[]string, seen map[string]bool, hasTimeTravel *bool, timestamp *string, perTable map[string]string) {
+	if expr == nil {
+		return
+	}
+
+	switch e := expr.(type) {
+	case *sqlparser.Subquery:
+		extractTablesFromSelectStatementWithAsOf(e.Select, tables, seen, hasTimeTravel, timestamp, perTable)
+	case *sqlparser.AndExpr:
+		extractTablesFromExprWithAsOf(e.Left, tables, seen, hasTimeTravel, timestamp, perTable)
+		extractTablesFromExprWithAsOf(e.Right, tables, seen, hasTimeTravel, timestamp, perTable)
+	case *sqlparser.OrExpr:
+		extractTablesFromExprWithAsOf(e.Left, tables, seen, hasTimeTravel, timestamp, perTable)
+		extractTablesFromExprWithAsOf(e.Right, tables, seen, hasTimeTravel, timestamp, perTable)
+	case *sqlparser.ComparisonExpr:
+		extractTablesFromExprWithAsOf(e.Left, tables, seen, hasTimeTravel, timestamp, perTable)
+		extractTablesFromExprWithAsOf(e.Right, tables, seen, hasTimeTravel, timestamp, perTable)
+	case *sqlparser.ParenExpr:
+		extractTablesFromExprWithAsOf(e.Expr, tables, seen, hasTimeTravel, timestamp, perTable)
+	case *sqlparser.RangeCond:
+		extractTablesFromExprWithAsOf(e.Left, tables, seen, hasTimeTravel, timestamp, perTable)
+		extractTablesFromExprWithAsOf(e.From, tables, seen, hasTimeTravel, timestamp, perTable)
+		extractTablesFromExprWithAsOf(e.To, tables, seen, hasTimeTravel, timestamp, perTable)
+	case *sqlparser.IsExpr:
+		extractTablesFromExprWithAsOf(e.Expr, tables, seen, hasTimeTravel, timestamp, perTable)
+	case *sqlparser.NotExpr:
+		extractTablesFromExprWithAsOf(e.Expr, tables, seen, hasTimeTravel, timestamp, perTable)
+	case *sqlparser.ExistsExpr:
+		extractTablesFromSelectStatementWithAsOf(e.Subquery.Select, tables, seen, hasTimeTravel, timestamp, perTable)
+	case *sqlparser.FuncExpr:
+		for _, arg := range e.Exprs {
+			if aliased, ok := arg.(*sqlparser.AliasedExpr); ok {
+				extractTablesFromExprWithAsOf(aliased.Expr, tables, seen, hasTimeTravel, timestamp, perTable)
+			}
+		}
+	case *sqlparser.CaseExpr:
+		extractTablesFromExprWithAsOf(e.Expr, tables, seen, hasTimeTravel, timestamp, perTable)
+		for _, when := range e.Whens {
+			extractTablesFromExprWithAsOf(when.Cond, tables, seen, hasTimeTravel, timestamp, perTable)
+			extractTablesFromExprWithAsOf(when.Val, tables, seen, hasTimeTravel, timestamp, perTable)
+		}
+		extractTablesFromExprWithAsOf(e.Else, tables, seen, hasTimeTravel, timestamp, perTable)
+	}
 }
 
 // extractTablesFromSelect extracts all table names from a SELECT statement.
@@ -152,6 +347,23 @@ func (p *Parser) Parse(sql string) (*LogicalPlan, error) {
 func extractTablesFromSelect(sel *sqlparser.Select) []string {
 	tables := make([]string, 0)
 	seen := make(map[string]bool)
+	cteNames := make(map[string]bool)
+
+	// Extract tables from CTEs (WITH clause) first
+	if sel.With != nil {
+		for _, cte := range sel.With.Ctes {
+			// Record CTE name to exclude later
+			if cte.As.String() != "" {
+				cteNames[cte.As.String()] = true
+			}
+			// Extract underlying tables from CTE definition
+			if cte.Expr != nil {
+				if subquery, ok := cte.Expr.(*sqlparser.Subquery); ok {
+					extractTablesFromSelectStatement(subquery.Select, &tables, seen)
+				}
+			}
+		}
+	}
 
 	// Extract from FROM clause
 	for _, tableExpr := range sel.From {
@@ -175,11 +387,19 @@ func extractTablesFromSelect(sel *sqlparser.Select) []string {
 		}
 	}
 
-	return tables
+	// Filter out CTE names
+	filteredTables := make([]string, 0, len(tables))
+	for _, t := range tables {
+		if !cteNames[t] {
+			filteredTables = append(filteredTables, t)
+		}
+	}
+
+	return filteredTables
 }
 
 // extractTablesFromUnion extracts tables from a UNION statement.
-func extractTablesFromUnion(union *sqlparser.Union) []string {
+func extractTablesFromUnion(union *sqlparser.SetOp) []string {
 	tables := make([]string, 0)
 	seen := make(map[string]bool)
 
@@ -196,13 +416,23 @@ func extractTablesFromUnion(union *sqlparser.Union) []string {
 func extractTablesFromSelectStatement(stmt sqlparser.SelectStatement, tables *[]string, seen map[string]bool) {
 	switch s := stmt.(type) {
 	case *sqlparser.Select:
+		// Handle CTEs
+		if s.With != nil {
+			for _, cte := range s.With.Ctes {
+				if cte.Expr != nil {
+					if subquery, ok := cte.Expr.(*sqlparser.Subquery); ok {
+						extractTablesFromSelectStatement(subquery.Select, tables, seen)
+					}
+				}
+			}
+		}
 		for _, tableExpr := range s.From {
 			extractTablesFromTableExpr(tableExpr, tables, seen)
 		}
 		if s.Where != nil {
 			extractTablesFromExpr(s.Where.Expr, tables, seen)
 		}
-	case *sqlparser.Union:
+	case *sqlparser.SetOp:
 		extractTablesFromSelectStatement(s.Left, tables, seen)
 		extractTablesFromSelectStatement(s.Right, tables, seen)
 	case *sqlparser.ParenSelect:
@@ -285,12 +515,20 @@ func extractTablesFromExpr(expr sqlparser.Expr, tables *[]string, seen map[strin
 }
 
 // formatTableName formats a TableName into a string.
-// Handles schema-qualified names (schema.table).
+// Handles schema-qualified names (schema.table) and database-qualified names (db.schema.table).
+// dolthub/vitess uses DbQualifier for database and SchemaQualifier for schema.
 func formatTableName(tn sqlparser.TableName) string {
-	if tn.Qualifier.IsEmpty() {
-		return tn.Name.String()
+	name := tn.Name.String()
+	
+	// Build qualified name: [db.][schema.]table
+	if !tn.SchemaQualifier.IsEmpty() {
+		name = tn.SchemaQualifier.String() + "." + name
 	}
-	return tn.Qualifier.String() + "." + tn.Name.String()
+	if !tn.DbQualifier.IsEmpty() {
+		name = tn.DbQualifier.String() + "." + name
+	}
+	
+	return name
 }
 
 // detectTimeTravel checks for AS OF syntax in the query.
@@ -368,19 +606,10 @@ func IsQualifiedTableName(name string) bool {
 // detectUnsupportedSyntax performs pre-parse detection of unsupported SQL constructs.
 // Per phase-3-spec.md §9: These must be detected BEFORE generic parse errors.
 // Returns an error if unsupported syntax is detected, nil otherwise.
+//
+// NOTE: CTEs (WITH clause) are now supported via dolthub/vitess parser (T013).
 func detectUnsupportedSyntax(sql string) error {
 	upperSQL := strings.ToUpper(sql)
-
-	// Check for CTEs (WITH clause at the beginning)
-	// Per phase-3-spec.md §9: CTEs must fail with specific error
-	if strings.HasPrefix(strings.TrimSpace(upperSQL), "WITH ") ||
-		strings.HasPrefix(strings.TrimSpace(upperSQL), "WITH\n") ||
-		strings.HasPrefix(strings.TrimSpace(upperSQL), "WITH\t") {
-		return errors.NewUnsupportedSyntax(
-			"CTE (WITH clause)",
-			"simple SELECT without WITH clauses; use subqueries instead",
-		)
-	}
 
 	// Check for WINDOW functions (OVER clause)
 	// Per phase-3-spec.md §9: WINDOW functions must fail with specific error
@@ -480,6 +709,8 @@ func detectVendorHints(sql string) error {
 
 // classifyParseError attempts to classify a parse error more specifically.
 // Per phase-3-spec.md §9: Generic parse errors should be avoided where classification is possible.
+//
+// NOTE: CTEs (WITH clause) are now supported via dolthub/vitess parser (T013).
 func classifyParseError(sql string, parseErr error) error {
 	errStr := parseErr.Error()
 	upperSQL := strings.ToUpper(sql)
@@ -490,23 +721,6 @@ func classifyParseError(sql string, parseErr error) error {
 		return errors.NewUnsupportedSyntax(
 			"WINDOW FUNCTION (OVER clause)",
 			"simple SELECT with GROUP BY for aggregation",
-		)
-	}
-
-	// Check if error is related to WITH (CTE)
-	if strings.Contains(errStr, "WITH") ||
-		strings.HasPrefix(strings.TrimSpace(upperSQL), "WITH") {
-		return errors.NewUnsupportedSyntax(
-			"CTE (WITH clause)",
-			"simple SELECT without WITH clauses; use subqueries instead",
-		)
-	}
-
-	// Check for RECURSIVE keyword
-	if strings.Contains(upperSQL, "RECURSIVE") {
-		return errors.NewUnsupportedSyntax(
-			"RECURSIVE CTE",
-			"simple SELECT without recursive queries",
 		)
 	}
 

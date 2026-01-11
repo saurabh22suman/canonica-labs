@@ -73,14 +73,16 @@ func TestRejectsWindowFunctions(t *testing.T) {
 	}
 }
 
-// TestRejectsCTEs tests that CTEs (WITH clauses) are explicitly rejected.
-// Per phase-3-spec.md §9: "CTEs (WITH clauses) must fail with a SPECIFIC, non-generic error."
-func TestRejectsCTEs(t *testing.T) {
+// TestCTEsAreNowSupported tests that CTEs (WITH clauses) are now properly parsed.
+// This test was previously TestRejectsCTEs, but CTEs are now supported via dolthub/vitess (T013).
+// Per phase-3-spec.md: CTEs must be parsed correctly and underlying tables extracted.
+func TestCTEsAreNowSupported(t *testing.T) {
 	parser := sql.NewParser()
 
-	queries := []struct {
-		name  string
-		query string
+	testCases := []struct {
+		name           string
+		query          string
+		expectedTables []string
 	}{
 		{
 			name: "Simple CTE",
@@ -90,6 +92,7 @@ func TestRejectsCTEs(t *testing.T) {
 				GROUP BY customer_id
 			)
 			SELECT * FROM customer_orders`,
+			expectedTables: []string{"test.orders"},
 		},
 		{
 			name: "Multiple CTEs",
@@ -97,6 +100,7 @@ func TestRejectsCTEs(t *testing.T) {
 				orders_2024 AS (SELECT * FROM test.orders WHERE year = 2024),
 				top_customers AS (SELECT customer_id FROM orders_2024 LIMIT 10)
 			SELECT * FROM top_customers`,
+			expectedTables: []string{"test.orders"},
 		},
 		{
 			name: "Recursive CTE",
@@ -106,25 +110,27 @@ func TestRejectsCTEs(t *testing.T) {
 				SELECT c.id, c.parent_id, c.name FROM test.categories c JOIN tree t ON c.parent_id = t.id
 			)
 			SELECT * FROM tree`,
+			expectedTables: []string{"test.categories"},
 		},
 	}
 
-	for _, tc := range queries {
+	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := parser.Parse(tc.query)
-			if err == nil {
-				t.Fatalf("CTE (WITH clause) should be rejected, but was accepted: %s", tc.query)
+			plan, err := parser.Parse(tc.query)
+			if err != nil {
+				t.Fatalf("CTE (WITH clause) should now be accepted, but got error: %v", err)
 			}
 
-			errMsg := err.Error()
+			// Verify the underlying tables are extracted
+			foundTables := make(map[string]bool)
+			for _, table := range plan.Tables {
+				foundTables[table] = true
+			}
 
-			// Must mention "CTE" or "WITH" specifically
-			hasCTE := strings.Contains(strings.ToUpper(errMsg), "CTE")
-			hasWITH := strings.Contains(strings.ToUpper(errMsg), "WITH")
-			hasCommon := strings.Contains(strings.ToUpper(errMsg), "COMMON TABLE")
-
-			if !hasCTE && !hasWITH && !hasCommon {
-				t.Errorf("Error must specifically mention CTE or WITH clause:\nGot: %s", errMsg)
+			for _, expected := range tc.expectedTables {
+				if !foundTables[expected] {
+					t.Errorf("Expected table %q to be extracted from CTE, got tables: %v", expected, plan.Tables)
+				}
 			}
 		})
 	}
